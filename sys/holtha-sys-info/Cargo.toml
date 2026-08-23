@@ -1,0 +1,8 @@
+﻿[package]
+name = "holtha-sys-info"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
