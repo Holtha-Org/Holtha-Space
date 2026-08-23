@@ -1,1 +1,3 @@
-﻿fn main() { println!("¡Holtha-Space configurado y listo!"); }
+fn main() {
+    println!("¡Holtha-Space configurado y listo!");
+}
