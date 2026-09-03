@@ -1,1 +1,1 @@
-﻿# Examples
+# Módulo examples
