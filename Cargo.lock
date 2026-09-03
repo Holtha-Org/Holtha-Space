@@ -3,30 +3,8 @@
 version = 4
 
 [[package]]
-name = "holtha"
+name = "herrat"
 version = "0.1.0"
-dependencies = [
- "holtha-audio-decode",
- "holtha-audio-mix",
- "holtha-audio-play",
- "holtha-core-errors",
- "holtha-core-types",
- "holtha-core-utils",
- "holtha-gfx-color",
- "holtha-gfx-render",
- "holtha-gfx-window",
- "holtha-input-key",
- "holtha-input-mouse",
- "holtha-input-pad",
- "holtha-math-geo",
- "holtha-math-mat",
- "holtha-math-vec",
- "holtha-net-tcp",
- "holtha-net-udp",
- "holtha-sys-fs",
- "holtha-sys-info",
- "holtha-sys-mem",
-]
 
 [[package]]
 name = "holtha-audio-decode"
@@ -95,6 +73,32 @@ version = "0.1.0"
 [[package]]
 name = "holtha-net-udp"
 version = "0.1.0"
+
+[[package]]
+name = "holtha-space"
+version = "0.1.0"
+dependencies = [
+ "holtha-audio-decode",
+ "holtha-audio-mix",
+ "holtha-audio-play",
+ "holtha-core-errors",
+ "holtha-core-types",
+ "holtha-core-utils",
+ "holtha-gfx-color",
+ "holtha-gfx-render",
+ "holtha-gfx-window",
+ "holtha-input-key",
+ "holtha-input-mouse",
+ "holtha-input-pad",
+ "holtha-math-geo",
+ "holtha-math-mat",
+ "holtha-math-vec",
+ "holtha-net-tcp",
+ "holtha-net-udp",
+ "holtha-sys-fs",
+ "holtha-sys-info",
+ "holtha-sys-mem",
+]
 
 [[package]]
 name = "holtha-sys-fs"

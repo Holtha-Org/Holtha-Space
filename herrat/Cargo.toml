@@ -1,0 +1,10 @@
+[package]
+name = "herrat"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "herrat"
+path = "src/main.rs"

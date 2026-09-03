@@ -1,5 +1,14 @@
+[package]
+name = "holtha-space"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+
 [workspace]
 members = [
+    ".",
+    "herrat",
     "herrat/*/*",
 ]
 resolver = "2"
@@ -9,3 +18,25 @@ version = "0.1.0"
 authors = ["Holtha Org"]
 license = "MIT"
 edition = "2021"
+
+[dependencies]
+holtha-audio-decode = { path = "herrat/audio/holtha-audio-decode" }
+holtha-audio-mix = { path = "herrat/audio/holtha-audio-mix" }
+holtha-audio-play = { path = "herrat/audio/holtha-audio-play" }
+holtha-core-errors = { path = "herrat/core/holtha-core-errors" }
+holtha-core-types = { path = "herrat/core/holtha-core-types" }
+holtha-core-utils = { path = "herrat/core/holtha-core-utils" }
+holtha-gfx-color = { path = "herrat/gfx/holtha-gfx-color" }
+holtha-gfx-render = { path = "herrat/gfx/holtha-gfx-render" }
+holtha-gfx-window = { path = "herrat/gfx/holtha-gfx-window" }
+holtha-input-key = { path = "herrat/input/holtha-input-key" }
+holtha-input-mouse = { path = "herrat/input/holtha-input-mouse" }
+holtha-input-pad = { path = "herrat/input/holtha-input-pad" }
+holtha-math-geo = { path = "herrat/math/holtha-math-geo" }
+holtha-math-mat = { path = "herrat/math/holtha-math-mat" }
+holtha-math-vec = { path = "herrat/math/holtha-math-vec" }
+holtha-net-tcp = { path = "herrat/net/holtha-net-tcp" }
+holtha-net-udp = { path = "herrat/net/holtha-net-udp" }
+holtha-sys-fs = { path = "herrat/sys/holtha-sys-fs" }
+holtha-sys-info = { path = "herrat/sys/holtha-sys-info" }
+holtha-sys-mem = { path = "herrat/sys/holtha-sys-mem" }

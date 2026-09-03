@@ -49,6 +49,19 @@ Herrat se encuentra en desarrollo. Actualmente, el workspace de Cargo se
 configura mediante el `Cargo.toml` raíz y descubre los crates ubicados dentro de
 `herrat`, mientras se define la interfaz y el funcionamiento propio de Herrat.
 
+El CLI ya incluye una primera capa funcional para trabajar con el monorepo:
+
+```bash
+cargo run -p herrat -- list
+cargo run -p herrat -- check
+cargo run -p herrat -- build
+cargo run -p herrat -- test
+cargo run -p herrat -- new <nombre>
+```
+
+Estos comandos permiten descubrir crates, crear módulos nuevos y ejecutar las
+operaciones de compilación y pruebas del workspace desde Herrat.
+
 ## Relación con Cargo
 
 Cargo continúa siendo la herramienta de compilación y gestión de dependencias
