@@ -1,13 +1,6 @@
 [workspace]
 members = [
-    "holtha",
-    "core/*",
-    "sys/*",
-    "gfx/*",
-    "math/*",
-    "input/*",
-    "net/*",
-    "audio/*",
+    "herrat/*/*",
 ]
 resolver = "2"
 
