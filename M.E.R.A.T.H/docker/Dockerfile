@@ -1,0 +1,244 @@
+# ============================================================================
+# N.E.K.O. Dockerfile - Standard Version (lightweight, downloads Chromium at runtime)
+# ============================================================================
+# This Dockerfile builds the "standard" version of N.E.K.O (~1.5GB).
+# Chromium browser is downloaded on first container start.
+#
+# Build: docker build -f docker/Dockerfile -t neko:latest .
+# Run:   docker run -d --name neko -p 48911:80 -p 48912:443 neko:latest
+#
+# Usage with docker-compose:
+#   docker-compose up -d  (uses latest tag by default)
+# ============================================================================
+
+# --- Stage 1: Build frontend projects ---
+FROM node:24-slim AS frontend-builder
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+WORKDIR /src
+
+# Copy frontend source code from local build context
+COPY frontend/plugin-manager /src/frontend/plugin-manager
+COPY frontend/react-neko-chat /src/frontend/react-neko-chat
+
+# Shared static assets bundled into plugin-manager at build time.
+# yui-guide-runtime.ts imports tutorial PNGs and shared icons via
+# `../../../static/...`; keep these COPY paths in sync with that file
+# (currently: static/assets/tutorial/{ghost-cursor,highlight}, static/icons).
+COPY static/assets/tutorial /src/static/assets/tutorial
+COPY static/icons /src/static/icons
+
+WORKDIR /src/frontend/plugin-manager
+RUN npm ci && npm run build-only
+
+WORKDIR /src/frontend/react-neko-chat
+RUN npm ci && npm run build
+
+# --- Stage 2: Runtime ---
+FROM debian:bookworm
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV TZ=Asia/Shanghai
+ENV XDG_DATA_HOME=/home/neko/.local/share
+# Per-request HTTP timeout for uv downloads (default 30s). Bumped because the
+# build runs on US Azure runners while the package mirror is in China, so large
+# wheels are slow to transfer; 30s caused spurious "operation timed out" failures.
+ENV UV_HTTP_TIMEOUT=120
+
+# Set working directory
+WORKDIR /app
+
+# 1. Configure Aliyun apt mirror sources (HTTPS)
+RUN echo "deb https://mirrors.aliyun.com/debian/ bookworm main non-free non-free-firmware contrib" > /etc/apt/sources.list && \
+    echo "deb-src https://mirrors.aliyun.com/debian/ bookworm main non-free non-free-firmware contrib" >> /etc/apt/sources.list && \
+    echo "deb https://mirrors.aliyun.com/debian-security/ bookworm-security main" >> /etc/apt/sources.list && \
+    echo "deb-src https://mirrors.aliyun.com/debian-security/ bookworm-security main" >> /etc/apt/sources.list && \
+    echo "deb https://mirrors.aliyun.com/debian/ bookworm-updates main non-free non-free-firmware contrib" >> /etc/apt/sources.list && \
+    echo "deb-src https://mirrors.aliyun.com/debian/ bookworm-updates main non-free non-free-firmware contrib" >> /etc/apt/sources.list && \
+    echo "deb https://mirrors.aliyun.com/debian/ bookworm-backports main non-free non-free-firmware contrib" >> /etc/apt/sources.list && \
+    echo "deb-src https://mirrors.aliyun.com/debian/ bookworm-backports main non-free non-free-firmware contrib" >> /etc/apt/sources.list
+
+# 2. Update system and install base dependencies
+RUN if [ -n "$HTTP_PROXY" ]; then export http_proxy=$HTTP_PROXY; fi; \
+    if [ -n "$HTTPS_PROXY" ]; then export https_proxy=$HTTPS_PROXY; fi; \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+    wget \
+    curl \
+    python3.11 \
+    python3.11-dev \
+    python3.11-venv \
+    pkg-config \
+    net-tools \
+    build-essential \
+    gcc \
+    g++ \
+    make \
+    portaudio19-dev \
+    nginx \
+    openssl \
+    bc \
+    tzdata \
+    fonts-wqy-zenhei \
+    && rm -rf /var/lib/apt/lists/* && \
+    unset http_proxy && \
+    unset https_proxy
+
+# Create nginx user and neko application user, plus Playwright cache directory
+#
+# neko 固定 uid/gid 1000（不用 `-r` 的系统号段）。/home/neko 是 bind mount 出去的
+# 持久化目录，容器给它的属主会原样出现在宿主机上；1000 是绝大多数 Linux 发行版第一个
+# 普通用户的号，对上之后用户备份、编辑、删除 neko-home 都不必 sudo。系统号段（100-999）
+# 是动态分配的，宿主上通常对应某个无关的服务账户，甚至每次重建镜像都可能变。
+# entrypoint 里对 /home/neko 的 chown 用的就是字面量 1000:1000，两处必须一致。
+# 1000 在 debian:bookworm 上是空的，而且是结构性的空：base-passwd 的静态表只到
+# uid 42 和 65534，Debian Policy 把 100-999 划给系统账户（`adduser --system` 强制落
+# 在这一段，上面的 nginx 就是），1000 起才是普通用户段，而基础镜像里压根没有"普通
+# 用户"这个概念。⚠️ 别把最终阶段的 FROM 换成 ubuntu:* 或 node:*-bookworm —— 它们
+# 预建的 ubuntu / node 用户正好占着 1000。（本文件的 node:24-slim 只是 builder 阶段，
+# 产物靠 COPY --from 取，不进最终镜像。）真撞上了，下面两条会直接失败让 build 红，
+# 而不是静默退回另一个号。
+RUN groupadd -r nginx && \
+    useradd -r -g nginx nginx && \
+    mkdir -p /var/log/nginx /var/cache/nginx && \
+    chown -R nginx:nginx /var/log/nginx /var/cache/nginx && \
+    groupadd -g 1000 neko && \
+    useradd -u 1000 -g 1000 -d /home/neko -s /bin/bash neko && \
+    mkdir -p /home/neko /app/logs /app/N.E.K.O /home/neko/ssl /opt/ms-playwright && \
+    chown -R neko:neko /home/neko /app /opt/ms-playwright
+
+# 3. Create Python symlinks
+RUN ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
+    ln -sf /usr/bin/python3.11 /usr/bin/python
+
+# 4. Install uv from official Docker image (pinned version for reproducibility)
+COPY --from=ghcr.io/astral-sh/uv:0.6.17 /uv /usr/local/bin/uv
+RUN chmod +x /usr/local/bin/uv && \
+    echo 'export PATH="/usr/local/bin:$PATH"' >> /root/.bashrc
+
+# 5. Configure uv mirrors + fallback.
+# Two China mirrors are tried in order (aliyun -> tsinghua); neither is marked
+# default, so the implicit default (pypi.org) stays as the final fallback -- which
+# is actually fastest on the US runner. If any mirror is missing a package or
+# stalls, uv walks down the list instead of single-pointing at aliyun.
+RUN mkdir -p /root/.config/uv && \
+    printf '%s\n' \
+      '[[index]]' \
+      'name = "aliyun"' \
+      'url = "https://mirrors.aliyun.com/pypi/simple/"' \
+      '[[index]]' \
+      'name = "tsinghua"' \
+      'url = "https://pypi.tuna.tsinghua.edu.cn/simple/"' \
+      > /root/.config/uv/uv.toml
+
+# 6. Copy N.E.K.O. project from local build context (with correct ownership)
+COPY --chown=neko:neko . /app
+
+# 6b. Verify (and, only for non-CI builds, download) the pinned local embedding
+# model. CI pre-fetches these weights on the native runner and caches them with
+# actions/cache, then ships them in the build context (.dockerignore no longer
+# excludes data/embedding_models), so this step finds them already present via
+# `COPY . /app` above and runs FULLY OFFLINE — no huggingface.co call. That
+# anonymous per-IP HTTP 429 throttle on shared runner egress is exactly what kept
+# failing the build at this point with no recovery. A plain `docker build` with
+# no pre-fetched weights falls back to downloading here (honoring the proxy ARGs).
+# The script force-re-downloads when the bundled (repo, revision) doesn't match
+# the pin, so a developer's stale local copy can't ship. repo+revision are pinned
+# identically to .github/workflows/{build-desktop,docker-multi-arch}.yml so every
+# build path resolves the same on-disk profile. Standard image ships only the
+# int8 variant (the runtime `auto` default) to stay lightweight; the full image
+# bundles fp32 too.
+ARG EMBEDDING_MODEL_REPO=jinaai/jina-embeddings-v5-text-nano-retrieval
+ARG EMBEDDING_MODEL_REVISION=ac5d898c8d382b17167c33e5c8af644a3519b47d
+ARG EMBEDDING_MODEL_PROFILE_ID=local-text-retrieval-v1
+RUN cd /app && \
+    if [ -n "$HTTP_PROXY" ]; then export http_proxy=$HTTP_PROXY; fi; \
+    if [ -n "$HTTPS_PROXY" ]; then export https_proxy=$HTTPS_PROXY; fi; \
+    python3 scripts/prepare_embedding_model.py \
+        --repo "$EMBEDDING_MODEL_REPO" \
+        --revision "$EMBEDDING_MODEL_REVISION" \
+        --profile-id "$EMBEDDING_MODEL_PROFILE_ID" \
+        --output-root data/embedding_models \
+        --variant int8 && \
+    unset http_proxy && \
+    unset https_proxy
+
+# 6c. Verify (and, only for non-CI builds, download) the pinned voice-turn ONNX
+# assets (Silero VAD + Smart Turn). Same scheme as 6b: CI pre-fetches the
+# weights on the native runner (cached by manifest hash, mirroring
+# build-desktop*.yml) and ships them in the build context, so this step only
+# SHA-256 verifies them offline. A plain `docker build` without pre-fetched
+# weights downloads them here (honoring the proxy ARGs). OnnxModelRuntime never
+# downloads at runtime, so without these files independent ASR endpointing
+# (Smart Turn) fails on GLM/Gemini routes.
+RUN cd /app && \
+    if [ -n "$HTTP_PROXY" ]; then export http_proxy=$HTTP_PROXY; fi; \
+    if [ -n "$HTTPS_PROXY" ]; then export https_proxy=$HTTPS_PROXY; fi; \
+    python3 scripts/prepare_voice_turn_assets.py && \
+    test -s /app/main_logic/asr_client/endpointing/models/THIRD_PARTY_NOTICES.md && \
+    test ! -e /app/data/vad_models && \
+    unset http_proxy && \
+    unset https_proxy
+
+# 6d. CAM++ is pre-fetched and SHA/size verified on the native CI runner. The
+# image build only verifies the copied package-local asset; it never downloads
+# under QEMU. Reject the obsolete data/ location and duplicate model bytes.
+RUN cd /app && \
+    python3 scripts/prepare_speaker_model.py --offline && \
+    test -s /app/main_logic/asr_client/speaker_shadow/models/THIRD_PARTY_NOTICES.md && \
+    test ! -e /app/data/speaker_models && \
+    test "$(find /app -type f -name campplus-zh-en-advanced.onnx | wc -l)" -eq 1
+
+# 7. Copy frontend build artifacts
+# Note: react-neko-chat's vite.config.ts writes to outDir `../../static/react/neko-chat`
+# (relative to its package root), so the actual build output lives at
+# /src/static/react/neko-chat — NOT /src/frontend/react-neko-chat/dist.
+COPY --from=frontend-builder /src/frontend/plugin-manager/dist /app/frontend/plugin-manager/dist
+COPY --from=frontend-builder /src/static/react/neko-chat /app/static/react/neko-chat
+
+# 7b. Extract built-in Live2D models (assets/<name>.tar.gz → static/<name>/)
+RUN cd /app && for model in yui-origin yui-lolita; do \
+        tar -xzmf "assets/$model.tar.gz" -C static/ || exit 1; \
+        test -f "static/$model/$model.moc3" || exit 1; \
+    done
+
+# 8. Install Python dependencies using uv
+RUN cd /app && \
+    if [ -n "$HTTP_PROXY" ]; then export http_proxy=$HTTP_PROXY; fi; \
+    if [ -n "$HTTPS_PROXY" ]; then export https_proxy=$HTTPS_PROXY; fi; \
+    uv sync --frozen && \
+    unset http_proxy && \
+    unset https_proxy
+
+# 8c. Fix ownership after root operations (uv sync + model download create files as root)
+RUN chown -R neko:neko /app
+
+# 9. Set Playwright environment variable
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+
+# 10. Set remaining environment variables
+ENV PATH="/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin:$PATH"
+ENV PYTHONPATH="/app:$PYTHONPATH"
+
+# 11. Copy entrypoint script
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# 12. Expose ports
+EXPOSE 80 443
+
+# 13. Show build information
+RUN echo "========================================" && \
+    echo "  N.E.K.O. Standard Image Build Complete" && \
+    echo "========================================" && \
+    echo "Python version: $(python --version)" && \
+    echo "UV version: $(uv --version)" && \
+    echo "Nginx version: $(nginx -v 2>&1)" && \
+    echo "========================================"
+
+# 14. Set entrypoint
+ENTRYPOINT ["/entrypoint.sh"]

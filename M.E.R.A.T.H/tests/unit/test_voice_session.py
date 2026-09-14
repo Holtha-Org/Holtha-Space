@@ -1,0 +1,1600 @@
+import pytest
+import json
+import base64
+import time
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+# Adjust path to import project modules
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
+
+import main_logic.omni_realtime_client as _realtime_package
+import main_logic.omni_realtime_client._gemini_support as _gemini_support
+from main_logic.omni_realtime_client import OmniRealtimeClient, TurnDetectionMode
+
+# Dummy WAV header + silence for testing audio streaming
+DUMMY_AUDIO_CHUNK = b'\x00' * 1024
+
+
+def test_realtime_package_state_reexports_follow_canonical_owner(monkeypatch):
+    sentinel_genai = object()
+    sentinel_types = object()
+
+    monkeypatch.setattr(_realtime_package, "GEMINI_AVAILABLE", False)
+    monkeypatch.setattr(_realtime_package, "genai", sentinel_genai)
+    monkeypatch.setattr(_gemini_support, "types", sentinel_types)
+
+    assert _gemini_support.GEMINI_AVAILABLE is False
+    assert _gemini_support.genai is sentinel_genai
+    assert _realtime_package.types is sentinel_types
+
+
+@pytest.mark.unit
+async def test_prime_context_skipped_accumulates_cached_instructions():
+    client = OmniRealtimeClient.__new__(OmniRealtimeClient)
+    client._is_gemini = False
+    client._model_lower = "gpt-4o-realtime"
+    client.instructions = "base instructions"
+    updates = []
+
+    async def fake_update_session(config):
+        updates.append(dict(config))
+
+    client.update_session = fake_update_session
+
+    await OmniRealtimeClient.prime_context(client, "assistant: hello", skipped=True)
+    await OmniRealtimeClient.prime_context(client, "user: choice", skipped=True)
+
+    assert updates == [
+        {"instructions": "base instructions\nassistant: hello"},
+        {"instructions": "base instructions\nassistant: hello\nuser: choice"},
+    ]
+    assert client.instructions == "base instructions\nassistant: hello\nuser: choice"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_gemini_create_response_propagates_send_failure(monkeypatch):
+    client = OmniRealtimeClient.__new__(OmniRealtimeClient)
+    client._is_gemini = True
+    client._gemini_session = object()
+
+    observed_turn_starts: list[bool] = []
+
+    async def fail_send_user_turn(_text, *, starts_user_turn=True):
+        observed_turn_starts.append(starts_user_turn)
+        raise RuntimeError("gemini send failed")
+
+    monkeypatch.setattr(client, "_gemini_send_user_turn", fail_send_user_turn)
+
+    with pytest.raises(RuntimeError, match="gemini send failed"):
+        await OmniRealtimeClient.create_response(client, "postgame context")
+
+    assert observed_turn_starts == [True]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_gemini_create_response_skipped_failure_restores_skip_state(monkeypatch):
+    client = OmniRealtimeClient.__new__(OmniRealtimeClient)
+    client._is_gemini = True
+    client._gemini_session = object()
+    client._skip_until_next_response = False
+
+    observed_turn_starts: list[bool] = []
+
+    async def fail_send_user_turn(_text, *, starts_user_turn=True):
+        observed_turn_starts.append(starts_user_turn)
+        raise RuntimeError("gemini send failed")
+
+    monkeypatch.setattr(client, "_gemini_send_user_turn", fail_send_user_turn)
+
+    with pytest.raises(RuntimeError, match="gemini send failed"):
+        await OmniRealtimeClient.create_response(client, "postgame context", skipped=True)
+
+    assert client._skip_until_next_response is False
+    assert observed_turn_starts == [True]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_gemini_prime_context_skipped_failure_restores_skip_state(monkeypatch):
+    client = OmniRealtimeClient.__new__(OmniRealtimeClient)
+    client._is_gemini = True
+    client._gemini_session = object()
+    client._skip_until_next_response = False
+
+    observed_turn_starts: list[bool] = []
+
+    async def fail_send_user_turn(_text, *, starts_user_turn=True):
+        observed_turn_starts.append(starts_user_turn)
+        raise RuntimeError("gemini send failed")
+
+    monkeypatch.setattr(client, "_gemini_send_user_turn", fail_send_user_turn)
+
+    with pytest.raises(RuntimeError, match="gemini send failed"):
+        await OmniRealtimeClient.prime_context(client, "assistant: context", skipped=True)
+
+    assert client._skip_until_next_response is False
+    # A task-result report is not the user's turn -- it must not retire tools.
+    assert observed_turn_starts == [False]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_gemini_create_response_raises_when_live_session_missing():
+    client = OmniRealtimeClient.__new__(OmniRealtimeClient)
+    client._is_gemini = True
+    client._gemini_session = None
+
+    with pytest.raises(RuntimeError, match="Gemini session not available"):
+        await OmniRealtimeClient.create_response(client, "postgame context")
+
+
+@pytest.fixture
+def mock_websocket():
+    """Returns a mock websocket object."""
+    mock_ws = AsyncMock()
+    mock_ws.send = AsyncMock()
+    mock_ws.recv = AsyncMock(return_value=json.dumps({"type": "session.created"}))
+    mock_ws.close = AsyncMock()
+    return mock_ws
+
+@pytest.fixture
+def realtime_client(mock_websocket):
+    """Returns an OmniRealtimeClient instance with a mocked websocket."""
+    # Setup config manager to return a Qwen or GLM profile
+    from utils.api_config_loader import get_core_api_profiles
+    core_profiles = get_core_api_profiles()
+    
+    # Prefer Qwen or GLM for realtime tests as they use WebSocket
+    provider = "qwen" if "qwen" in core_profiles else "glm"
+    if provider not in core_profiles:
+        # Fallback to OpenAI if available
+        if "openai" in core_profiles:
+             provider = "openai"
+        else:
+             pytest.skip("No suitable realtime provider (Qwen/GLM/OpenAI) found.")
+    
+    profile = core_profiles[provider]
+    base_url = profile['CORE_URL']
+    api_key = profile.get('CORE_API_KEY')
+    
+    if not api_key:
+        # Fallback mapping for Core keys
+        # Qwen Core shares key with Assist usually
+        key_map = {
+            "qwen": "ASSIST_API_KEY_QWEN",
+            "openai": "ASSIST_API_KEY_OPENAI",
+            "glm": "ASSIST_API_KEY_GLM" 
+        }
+        env_var = key_map.get(provider)
+        if env_var:
+             api_key = os.environ.get(env_var)
+             
+    if not api_key:
+        pytest.skip(f"API key for {provider} not found.")
+        
+    model = profile.get('CORE_MODEL', '') # In realtime client, model usually specified in init or update_session
+
+    client = OmniRealtimeClient(
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        turn_detection_mode=TurnDetectionMode.SERVER_VAD,
+        on_text_delta=AsyncMock(),
+        on_audio_delta=AsyncMock(),
+        on_input_transcript=AsyncMock(),
+        on_output_transcript=AsyncMock()
+    )
+    
+    # Manually set the ws to skip the actual connect calls in some tests, 
+    # OR we patch websockets.connect in the test itself.
+    return client
+
+@pytest.mark.unit
+async def test_connect_and_session_update(realtime_client):
+    """Test that client connects and sends session update."""
+    with patch("websockets.connect", new_callable=AsyncMock) as mock_connect:
+        # Setup mock connection to return our mock_ws
+        mock_ws = AsyncMock()
+        mock_connect.return_value = mock_ws
+        
+        await realtime_client.connect(instructions="You are a helpful assistant.", native_audio=True)
+        
+        assert mock_connect.called
+        assert realtime_client.ws is not None
+        
+        # Verify initial session update was sent
+        # The client sends "session.update" after connecting for most models
+        # We need to inspect calls to socket.send
+        assert mock_ws.send.called
+        
+        # Check if instructions were sent
+        calls = mock_ws.send.call_args_list
+        session_update_found = False
+        for call_args in calls:
+            msg = json.loads(call_args[0][0])
+            if msg.get("type") == "session.update":
+                session_update_found = True
+                # Check instructions in session config
+                if "session" in msg and "instructions" in msg["session"]:
+                     assert "You are a helpful assistant" in msg["session"]["instructions"]
+        
+        assert session_update_found, "session.update event not found in websocket calls"
+        
+        await realtime_client.close()
+
+@pytest.mark.unit
+async def test_stream_audio(realtime_client):
+    """Test streaming audio chunks."""
+    # We need to manually set ws because we are skipping connect()
+    realtime_client.ws = AsyncMock()
+    
+    # We also need to mock audio processor to avoid threading issues or just verify raw logic
+    # But usually it's fine.
+    
+    await realtime_client.stream_audio(DUMMY_AUDIO_CHUNK)
+    
+    # Verify audio append event
+    assert realtime_client.ws.send.called
+    calls = realtime_client.ws.send.call_args_list
+    
+    # Qwen/GLM send 'input_audio_buffer.append' with base64 audio
+    audio_append_found = False
+    for call_args in calls:
+        msg = json.loads(call_args[0][0])
+        if msg.get("type") == "input_audio_buffer.append":
+            audio_append_found = True
+            assert "audio" in msg
+            # DUMMY_AUDIO_CHUNK is 1024 bytes. Verify it's base64 encoded.
+            decoded = base64.b64decode(msg["audio"])
+            # Length might chance due to downsampling in audio_processor if it was 48k -> 16k
+            # But DUMMY_AUDIO_CHUNK is 1024 bytes (512 samples @ 16bit).
+            # If default sample rate assumed 16k, it passes through.
+            
+    assert audio_append_found, "input_audio_buffer.append event not found"
+    
+    await realtime_client.close()
+
+
+@pytest.mark.unit
+async def test_clear_audio_buffer_sends_websocket_clear_event():
+    client = _make_manual_client(model="qwen-omni-turbo-realtime", api_type="qwen")
+    sent: list[dict] = []
+
+    async def fake_send(payload):
+        sent.append(json.loads(payload))
+
+    client.ws = AsyncMock()
+    client.ws.send = AsyncMock(side_effect=fake_send)
+
+    await client.clear_audio_buffer()
+
+    assert [event["type"] for event in sent] == ["input_audio_buffer.clear"]
+
+
+@pytest.mark.unit
+async def test_silence_reset_flushes_buffer_before_next_audio_append():
+    client = _make_manual_client(model="qwen-omni-turbo-realtime", api_type="qwen")
+    sent: list[dict] = []
+
+    async def fake_send(payload):
+        sent.append(json.loads(payload))
+
+    client.ws = AsyncMock()
+    client.ws.send = AsyncMock(side_effect=fake_send)
+    client._silence_reset_pending = True
+
+    await client.stream_audio(DUMMY_AUDIO_CHUNK)
+
+    types_sent = [event["type"] for event in sent]
+    assert types_sent[:2] == ["input_audio_buffer.clear", "input_audio_buffer.append"]
+
+
+@pytest.mark.unit
+async def test_receive_text_delta(realtime_client):
+    """Test handling of incoming text delta events via handle_messages."""
+    # Simulate a sequence of WebSocket messages that includes text deltas
+    events = [
+        json.dumps({"type": "response.created", "response": {"id": "resp_001"}}),
+        json.dumps({"type": "response.text.delta", "delta": "Hello"}),
+        json.dumps({"type": "response.text.delta", "delta": " world"}),
+        json.dumps({"type": "response.done", "response": {"id": "resp_001"}}),
+    ]
+    
+    
+    realtime_client.ws = AsyncMock()
+    realtime_client.ws.__aiter__.return_value = events
+    
+    # Ensure on_text_delta is an AsyncMock so we can track calls
+    text_delta_mock = AsyncMock()
+    realtime_client.on_text_delta = text_delta_mock
+    
+    response_done_mock = AsyncMock()
+    realtime_client.on_response_done = response_done_mock
+    
+    # Run handle_messages — it will process all events then exit when iteration ends
+    await realtime_client.handle_messages()
+    
+    # Verify on_text_delta was called twice with the correct deltas
+    # Note: glm models skip on_text_delta (see handle_messages code), 
+    # so this test works for non-glm models
+    if "glm" not in realtime_client.model:
+        assert text_delta_mock.call_count == 2, f"Expected 2 text delta calls, got {text_delta_mock.call_count}"
+        # First call: "Hello" with is_first=True
+        first_call = text_delta_mock.call_args_list[0]
+        assert first_call[0][0] == "Hello"
+        assert first_call[0][1] is True  # is_first_text_chunk
+        # Second call: " world" with is_first=False
+        second_call = text_delta_mock.call_args_list[1]
+        assert second_call[0][0] == " world"
+        assert second_call[0][1] is False
+    
+    # Verify response.done was processed
+    assert response_done_mock.called
+
+
+@pytest.mark.unit
+async def test_cancelled_response_done_is_forwarded_to_response_arbiter(
+    realtime_client,
+):
+    realtime_client.ws = AsyncMock()
+    realtime_client.ws.__aiter__.return_value = [
+        json.dumps({
+            "type": "response.done",
+            "response": {"id": "resp_cancelled", "status": "cancelled"},
+        }),
+    ]
+    realtime_client._response_arbiter.notify_response_terminal = MagicMock()
+    realtime_client.on_response_done = AsyncMock()
+
+    await realtime_client.handle_messages()
+
+    realtime_client._response_arbiter.notify_response_terminal.assert_called_once_with(
+        {
+            "type": "response.done",
+            "response": {"id": "resp_cancelled", "status": "cancelled"},
+        }
+    )
+
+
+@pytest.mark.unit
+async def test_late_delta_from_cancelled_response_is_not_forwarded_after_new_response():
+    client = _make_manual_client(model="gpt-4o-realtime-preview", api_type="openai")
+    events = [
+        json.dumps({"type": "response.created", "response": {"id": "resp_old"}}),
+        json.dumps({"type": "response.created", "response": {"id": "resp_new"}}),
+        json.dumps(
+            {
+                "type": "response.text.delta",
+                "response_id": "resp_old",
+                "delta": "stale",
+            }
+        ),
+        json.dumps(
+            {
+                "type": "response.audio.delta",
+                "response_id": "resp_old",
+                "delta": base64.b64encode(b"stale-audio").decode("ascii"),
+            }
+        ),
+        json.dumps({"type": "response.done", "response": {"id": "resp_old"}}),
+        json.dumps(
+            {
+                "type": "response.text.delta",
+                "response_id": "resp_new",
+                "delta": "fresh",
+            }
+        ),
+        json.dumps(
+            {
+                "type": "response.audio.delta",
+                "response_id": "resp_new",
+                "delta": base64.b64encode(b"fresh-audio").decode("ascii"),
+            }
+        ),
+        json.dumps({"type": "response.done", "response": {"id": "resp_new"}}),
+    ]
+    client.ws = AsyncMock()
+    client.ws.__aiter__.return_value = events
+    client.on_text_delta = AsyncMock()
+    client.on_audio_delta = AsyncMock()
+
+    await client.handle_messages()
+
+    client.on_text_delta.assert_awaited_once_with("fresh", True)
+    client.on_audio_delta.assert_awaited_once_with(b"fresh-audio")
+
+
+async def test_id_bearing_events_are_dropped_without_an_active_response():
+    client = _make_manual_client(model="gpt-4o-realtime-preview", api_type="openai")
+    client.ws = AsyncMock()
+    client.ws.__aiter__.return_value = [
+        json.dumps({"type": "response.created", "response": {"id": "resp-old"}}),
+        json.dumps({"type": "response.done", "response": {"id": "resp-old"}}),
+        json.dumps(
+            {
+                "type": "response.text.delta",
+                "response_id": "resp-old",
+                "delta": "late",
+            }
+        ),
+        json.dumps(
+            {
+                "type": "response.function_call_arguments.done",
+                "response_id": "resp-old",
+                "call_id": "call-old",
+                "name": "late_tool",
+                "arguments": "{}",
+            }
+        ),
+    ]
+    client.on_text_delta = AsyncMock()
+    client.on_tool_call = AsyncMock()
+
+    await client.handle_messages()
+
+    client.on_text_delta.assert_not_awaited()
+    client.on_tool_call.assert_not_awaited()
+
+
+class _ScriptedWs:
+    """Async-iterable ws stub driven by an async generator.
+
+    Unlike ``AsyncMock.__aiter__.return_value``, an async generator lets a
+    test capture arbiter state between events, before the end-of-stream
+    path calls ``arbiter.shutdown`` and wipes the tracked response ids.
+    """
+
+    def __init__(self, agen):
+        self._agen = agen
+
+    def __aiter__(self):
+        return self._agen
+
+    async def close(self):
+        pass
+
+
+@pytest.mark.unit
+async def test_crossed_response_done_releases_arbiter_tracked_id_immediately():
+    """A stale ``response.done`` must still reach the response arbiter.
+
+    When a server-initiated response and a newer response cross so both
+    ``response.created`` events are observed, the earlier response's
+    ``response.done`` hits the transport's stale-event filter. Its terminal
+    must be forwarded to the arbiter anyway: otherwise the tracked id keeps
+    the lane closed until the staleness timer (60s) instead of releasing
+    immediately.
+    """
+    client = _make_manual_client(model="gpt-4o-realtime-preview", api_type="openai")
+    arbiter = client._response_arbiter
+    state = {}
+
+    async def events():
+        yield json.dumps({"type": "response.created", "response": {"id": "resp_a"}})
+        yield json.dumps({"type": "response.created", "response": {"id": "resp_b"}})
+        state["before_done"] = set(arbiter._server_response_ids)
+        yield json.dumps({"type": "response.done", "response": {"id": "resp_a"}})
+        # Captured right after the stale done was processed, before the
+        # end-of-stream shutdown wipes the arbiter state.
+        state["after_done"] = set(arbiter._server_response_ids)
+        state["busy_after_done"] = arbiter.is_busy
+
+    client.ws = _ScriptedWs(events())
+    await client.handle_messages()
+
+    assert state["before_done"] == {"resp_a", "resp_b"}
+    # Negative validation: before the fix the stale filter swallowed
+    # resp_a's terminal, so its id stayed tracked (and held the lane)
+    # until the staleness timer expired.
+    assert state["after_done"] == {"resp_b"}
+    # The later response is still live and must keep holding the lane.
+    assert state["busy_after_done"] is True
+
+
+@pytest.mark.unit
+async def test_crossed_response_done_keeps_stale_content_filtered_and_frees_lane():
+    """The stale terminal releases the arbiter without leaking content.
+
+    The earlier response's ``response.done`` reaches the arbiter, but its
+    content (text deltas) and content-side completion semantics
+    (``on_response_done``) stay filtered; once the current response also
+    finishes, the lane opens immediately.
+    """
+    client = _make_manual_client(model="gpt-4o-realtime-preview", api_type="openai")
+    arbiter = client._response_arbiter
+    state = {}
+
+    async def events():
+        yield json.dumps({"type": "response.created", "response": {"id": "resp_a"}})
+        yield json.dumps({"type": "response.created", "response": {"id": "resp_b"}})
+        yield json.dumps(
+            {"type": "response.text.delta", "response_id": "resp_a", "delta": "stale"}
+        )
+        yield json.dumps({"type": "response.done", "response": {"id": "resp_a"}})
+        state["done_calls_after_stale_done"] = client.on_response_done.await_count
+        yield json.dumps(
+            {"type": "response.text.delta", "response_id": "resp_b", "delta": "fresh"}
+        )
+        yield json.dumps({"type": "response.done", "response": {"id": "resp_b"}})
+        state["ids_after_both_done"] = set(arbiter._server_response_ids)
+        state["busy_after_both_done"] = arbiter.is_busy
+
+    client.on_text_delta = AsyncMock()
+    client.on_response_done = AsyncMock()
+    client.ws = _ScriptedWs(events())
+    await client.handle_messages()
+
+    # Stale content is still filtered; only the current response renders.
+    client.on_text_delta.assert_awaited_once_with("fresh", True)
+    # The stale response.done must not run content-side completion.
+    assert state["done_calls_after_stale_done"] == 0
+    assert client.on_response_done.await_count == 1
+    # Both terminals delivered: the lane opens immediately, no timer wait.
+    assert state["ids_after_both_done"] == set()
+    assert state["busy_after_both_done"] is False
+
+
+@pytest.mark.unit
+async def test_single_response_done_flow_releases_arbiter_lane():
+    """Normal single-response flow is unchanged by the stale-terminal fix."""
+    client = _make_manual_client(model="gpt-4o-realtime-preview", api_type="openai")
+    arbiter = client._response_arbiter
+    state = {}
+
+    async def events():
+        yield json.dumps({"type": "response.created", "response": {"id": "resp_a"}})
+        yield json.dumps(
+            {"type": "response.text.delta", "response_id": "resp_a", "delta": "hello"}
+        )
+        yield json.dumps({"type": "response.done", "response": {"id": "resp_a"}})
+        state["ids_after_done"] = set(arbiter._server_response_ids)
+        state["busy_after_done"] = arbiter.is_busy
+
+    client.on_text_delta = AsyncMock()
+    client.on_response_done = AsyncMock()
+    client.ws = _ScriptedWs(events())
+    await client.handle_messages()
+
+    client.on_text_delta.assert_awaited_once_with("hello", True)
+    client.on_response_done.assert_awaited_once()
+    assert state["ids_after_done"] == set()
+    assert state["busy_after_done"] is False
+
+
+# ──────────────────────────────────────────────────────────────────────
+# VAD MANUAL turn detection tests
+# ──────────────────────────────────────────────────────────────────────
+#
+# These tests exercise the MANUAL branch added in the
+# OmniRealtimeClient.connect() per-provider chain. For each provider we:
+#   1. Construct the client with turn_detection_mode=MANUAL
+#   2. Patch websockets.connect (websocket-based providers) or the
+#      genai live SDK (Gemini)
+#   3. Call connect() and capture the session config that was sent
+#   4. Assert the manual-mode payload structure (turn_detection=null,
+#      or for Gemini: realtime_input_config.automatic_activity_detection
+#      .disabled=True)
+#
+# All tests bypass real API keys / models — they construct a stub client
+# directly and only exercise connect() once the constructor has run with
+# valid placeholder values.
+
+
+def _make_manual_client(model: str, base_url: str = "wss://example.test/realtime", api_type: str = ""):
+    """Construct a minimal OmniRealtimeClient with TurnDetectionMode.MANUAL.
+
+    Skips dependency on real config — passes a valid model/base_url so the
+    provider selector inside connect() picks the right branch.
+    """
+    return OmniRealtimeClient(
+        base_url=base_url,
+        api_key="sk-test",
+        model=model,
+        turn_detection_mode=TurnDetectionMode.MANUAL,
+        api_type=api_type,
+    )
+
+
+async def _run_connect_and_capture_session(client):
+    """Patch websockets.connect, run client.connect(), return the session
+    dict from the captured session.update event.
+    """
+    captured: dict = {}
+
+    async def fake_send(payload):
+        try:
+            event = json.loads(payload)
+        except Exception:
+            return
+        if event.get("type") == "session.update":
+            captured["session"] = event.get("session")
+
+    mock_ws = AsyncMock()
+    mock_ws.send = AsyncMock(side_effect=fake_send)
+
+    with patch("websockets.connect", new_callable=AsyncMock) as mock_connect:
+        mock_connect.return_value = mock_ws
+        try:
+            await client.connect(instructions="You are helpful.", native_audio=True)
+        finally:
+            # GLM/free providers start a background silence-detection task in
+            # connect(); without close() it lingers across tests and can cause
+            # cross-test interference / pytest warnings. close() cancels the
+            # task before returning.
+            await client.close()
+
+    return captured.get("session")
+
+
+@pytest.mark.unit
+async def test_connect_qwen_manual_vad_sends_null_turn_detection():
+    """Qwen MANUAL: turn_detection=None, transcription model preserved."""
+    client = _make_manual_client(model="qwen-omni-turbo-realtime", api_type="qwen")
+    session = await _run_connect_and_capture_session(client)
+
+    assert session is not None, "session.update event not captured"
+    assert session.get("turn_detection") is None
+    # Qwen's input_audio_transcription must remain pinned to gummy-realtime-v1
+    assert session.get("input_audio_transcription") == {"model": "gummy-realtime-v1"}
+
+
+@pytest.mark.unit
+async def test_connect_openai_manual_vad_sends_null_audio_input_turn_detection():
+    """OpenAI MANUAL: audio.input.turn_detection=None, transcription preserved."""
+    client = _make_manual_client(
+        model="gpt-realtime",
+        base_url="wss://api.openai.com/v1/realtime",
+        api_type="openai",
+    )
+    session = await _run_connect_and_capture_session(client)
+
+    assert session is not None, "session.update event not captured"
+    audio_input = session.get("audio", {}).get("input", {})
+    assert audio_input.get("turn_detection") is None
+    assert audio_input.get("transcription") == {"model": "gpt-4o-mini-transcribe"}
+
+
+@pytest.mark.unit
+async def test_connect_glm_manual_vad_sends_null_turn_detection():
+    """GLM MANUAL: turn_detection=None (best-effort; may be rejected server-side)."""
+    client = _make_manual_client(model="glm-realtime", api_type="glm")
+    session = await _run_connect_and_capture_session(client)
+
+    assert session is not None
+    assert session.get("turn_detection") is None
+
+
+@pytest.mark.unit
+async def test_connect_step_manual_vad_sends_null_turn_detection():
+    """Step MANUAL: turn_detection=None."""
+    client = _make_manual_client(model="step-1o-audio", api_type="step")
+    session = await _run_connect_and_capture_session(client)
+
+    assert session is not None
+    assert session.get("turn_detection") is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "proxy_url",
+    [
+        "wss://www.lanlan.tech/realtime",  # StepFun proxy
+        "wss://www.lanlan.app/realtime",   # Vertex Gemini proxy
+    ],
+)
+async def test_connect_free_proxy_routes_manual_vad_per_backend(proxy_url):
+    """Free MANUAL: both StepFun (lanlan.tech) and Vertex Gemini (lanlan.app)
+    proxies receive turn_detection=None via the StepFun-shape websocket
+    session config. Server-side translation happens at the proxy.
+    """
+    client = _make_manual_client(model="free-model", base_url=proxy_url, api_type="free")
+    session = await _run_connect_and_capture_session(client)
+
+    assert session is not None
+    assert session.get("turn_detection") is None
+
+
+@pytest.mark.unit
+async def test_connect_gemini_manual_vad_disables_automatic_activity_detection():
+    """Gemini MANUAL: realtime_input_config.automatic_activity_detection.disabled=True
+    is added to the LiveConnectConfig passed into client.aio.live.connect(...).
+    """
+    pytest.importorskip("google.genai")
+
+    client = _make_manual_client(
+        model="gemini-2.0-flash-exp",
+        base_url="https://generativelanguage.googleapis.com",
+        api_type="gemini",
+    )
+
+    # Patch the genai.Client constructor so we capture the LiveConnectConfig
+    # passed to client.aio.live.connect(). The connect() method returns an
+    # async context manager; we mock both __aenter__ and __aexit__.
+    captured: dict = {}
+
+    fake_session = AsyncMock()
+    fake_ctx = AsyncMock()
+    fake_ctx.__aenter__ = AsyncMock(return_value=fake_session)
+    fake_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    def fake_live_connect(*, model, config):
+        captured["model"] = model
+        captured["config"] = config
+        return fake_ctx
+
+    fake_genai_client = MagicMock()
+    fake_genai_client.aio.live.connect = MagicMock(side_effect=fake_live_connect)
+
+    with patch("main_logic.omni_realtime_client._gemini_support.genai") as mock_genai_module:
+        mock_genai_module.Client = MagicMock(return_value=fake_genai_client)
+        await client.connect(instructions="You are helpful.", native_audio=True)
+
+    config = captured.get("config")
+    assert config is not None, "Gemini live.connect was not called"
+    rt_input = config.get("realtime_input_config")
+    assert rt_input is not None, (
+        "realtime_input_config missing — MANUAL mode must disable automatic VAD"
+    )
+    aad = getattr(rt_input, "automatic_activity_detection", None)
+    assert aad is not None
+    assert getattr(aad, "disabled", False) is True
+
+
+# ──────────────────────────────────────────────────────────────────────
+# signal_user_activity_end() — MANUAL turn-end emission
+# ──────────────────────────────────────────────────────────────────────
+#
+# Codex PR #1128 r3182348361: with automatic_activity_detection.disabled=
+# True, end-of-turn becomes the client's responsibility. The Gemini
+# branch had no emission path — only raw audio chunks via
+# send_realtime_input(audio=...) — so manual sessions left the model
+# without a turn boundary.
+#
+# Authoritative source for the wire format (google-genai SDK
+# LiveClientRealtimeInput docs, types.py):
+#
+#   automatic_activity_detection: "If not set, automatic activity
+#   detection is enabled by default. If automatic voice detection is
+#   disabled, the client must send activity signals."
+#
+#   activity_end (ActivityEnd): "Marks the end of user activity. This
+#   can only be sent if automatic (i.e. server-side) activity detection
+#   is disabled."
+#
+#   audio_stream_end: "Indicates that the audio stream has ended ...
+#   This should only be sent when automatic activity detection is
+#   enabled (which is the default)." — therefore NOT applicable in our
+#   MANUAL path.
+
+
+@pytest.mark.unit
+async def test_signal_user_activity_end_gemini_manual_sends_activity_end():
+    """Gemini MANUAL: signal_user_activity_end() must emit activity_end
+    via send_realtime_input(activity_end=ActivityEnd()) — without it,
+    the model never sees a turn boundary and never responds to spoken
+    input.
+    """
+    pytest.importorskip("google.genai")
+    from google.genai import types as genai_types
+
+    client = _make_manual_client(
+        model="gemini-2.0-flash-exp",
+        base_url="https://generativelanguage.googleapis.com",
+        api_type="gemini",
+    )
+
+    fake_session = AsyncMock()
+    fake_ctx = AsyncMock()
+    fake_ctx.__aenter__ = AsyncMock(return_value=fake_session)
+    fake_ctx.__aexit__ = AsyncMock(return_value=False)
+    fake_genai_client = MagicMock()
+    fake_genai_client.aio.live.connect = MagicMock(return_value=fake_ctx)
+
+    with patch("main_logic.omni_realtime_client._gemini_support.genai") as mock_genai_module:
+        mock_genai_module.Client = MagicMock(return_value=fake_genai_client)
+        await client.connect(instructions="hi", native_audio=True)
+
+    # Reset call tracking after connect; we only care about the
+    # signal_user_activity_end emission, not connect-time setup calls.
+    fake_session.send_realtime_input.reset_mock()
+
+    await client.signal_user_activity_end()
+
+    assert fake_session.send_realtime_input.await_count == 1, (
+        "MANUAL Gemini must emit exactly one activity_end signal"
+    )
+    call_kwargs = fake_session.send_realtime_input.await_args.kwargs
+    assert "activity_end" in call_kwargs, (
+        f"Expected kw 'activity_end' in send_realtime_input call, got {call_kwargs!r}. "
+        f"Per SDK docs (LiveClientRealtimeInput.activity_end), this is the "
+        f"canonical signal when automatic_activity_detection.disabled=True. "
+        f"audio_stream_end is NOT applicable — it's documented as "
+        f"'only when automatic activity detection is enabled'."
+    )
+    assert isinstance(call_kwargs["activity_end"], genai_types.ActivityEnd)
+    # No other kwargs — the SDK requires exactly one arg per call.
+    assert set(call_kwargs.keys()) == {"activity_end"}
+
+
+@pytest.mark.unit
+async def test_signal_user_activity_end_gemini_server_vad_is_noop():
+    """Gemini SERVER_VAD: signal_user_activity_end() must NOT emit
+    anything — server-side AAD owns turn detection in this mode, and
+    sending activity_end while AAD is enabled is rejected by the API.
+    """
+    pytest.importorskip("google.genai")
+
+    client = OmniRealtimeClient(
+        base_url="https://generativelanguage.googleapis.com",
+        api_key="sk-test",
+        model="gemini-2.0-flash-exp",
+        turn_detection_mode=TurnDetectionMode.SERVER_VAD,
+        api_type="gemini",
+    )
+
+    fake_session = AsyncMock()
+    fake_ctx = AsyncMock()
+    fake_ctx.__aenter__ = AsyncMock(return_value=fake_session)
+    fake_ctx.__aexit__ = AsyncMock(return_value=False)
+    fake_genai_client = MagicMock()
+    fake_genai_client.aio.live.connect = MagicMock(return_value=fake_ctx)
+
+    with patch("main_logic.omni_realtime_client._gemini_support.genai") as mock_genai_module:
+        mock_genai_module.Client = MagicMock(return_value=fake_genai_client)
+        await client.connect(instructions="hi", native_audio=True)
+
+    fake_session.send_realtime_input.reset_mock()
+    await client.signal_user_activity_end()
+
+    fake_session.send_realtime_input.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_gemini_connect_uses_supplied_native_voice():
+    """Gemini Live should receive the resolved native voice instead of Leda."""
+    pytest.importorskip("google.genai")
+
+    client = OmniRealtimeClient(
+        base_url="https://generativelanguage.googleapis.com",
+        api_key="sk-test",
+        model="gemini-2.0-flash-exp",
+        voice="中文男",
+        turn_detection_mode=TurnDetectionMode.SERVER_VAD,
+        api_type="gemini",
+    )
+
+    fake_session = AsyncMock()
+    fake_ctx = AsyncMock()
+    fake_ctx.__aenter__ = AsyncMock(return_value=fake_session)
+    fake_ctx.__aexit__ = AsyncMock(return_value=False)
+    fake_genai_client = MagicMock()
+    fake_genai_client.aio.live.connect = MagicMock(return_value=fake_ctx)
+
+    with patch("main_logic.omni_realtime_client._gemini_support.genai") as mock_genai_module:
+        mock_genai_module.Client = MagicMock(return_value=fake_genai_client)
+        await client.connect(instructions="hi", native_audio=True)
+
+    config = fake_genai_client.aio.live.connect.call_args.kwargs["config"]
+    speech_config = config["speech_config"]
+    voice_name = speech_config.voice_config.prebuilt_voice_config.voice_name
+    assert voice_name == "Puck"
+
+
+@pytest.mark.unit
+async def test_signal_user_activity_end_websocket_manual_sends_commit_and_response_create():
+    """OpenAI/Qwen/GLM/Step path MANUAL: signal_user_activity_end() must
+    emit ``input_audio_buffer.commit`` followed by ``response.create``.
+    Without these, the server holds the buffered audio forever and never
+    runs inference.
+    """
+    client = _make_manual_client(model="qwen-omni-turbo-realtime", api_type="qwen")
+
+    sent: list[dict] = []
+
+    async def fake_send(payload):
+        try:
+            sent.append(json.loads(payload))
+        except json.JSONDecodeError:
+            # Why: payload may be bytes audio frames, not JSON — ignore non-JSON in this collector.
+            pass
+
+    mock_ws = AsyncMock()
+    mock_ws.send = AsyncMock(side_effect=fake_send)
+    client.ws = mock_ws
+
+    await client.signal_user_activity_end()
+
+    types_sent = [e.get("type") for e in sent]
+    assert "input_audio_buffer.commit" in types_sent, (
+        f"MANUAL websocket path must send input_audio_buffer.commit; got {types_sent!r}"
+    )
+    assert "response.create" in types_sent, (
+        f"MANUAL websocket path must send response.create; got {types_sent!r}"
+    )
+    # Ordering: commit before response.create
+    assert types_sent.index("input_audio_buffer.commit") < types_sent.index("response.create")
+
+
+@pytest.mark.unit
+async def test_signal_user_activity_end_websocket_server_vad_is_noop():
+    """SERVER_VAD path: signal_user_activity_end() is a no-op — the
+    server emits turn-end signals on its own.
+    """
+    client = OmniRealtimeClient(
+        base_url="wss://example.test/realtime",
+        api_key="sk-test",
+        model="qwen-omni-turbo-realtime",
+        turn_detection_mode=TurnDetectionMode.SERVER_VAD,
+        api_type="qwen",
+    )
+    mock_ws = AsyncMock()
+    client.ws = mock_ws
+
+    await client.signal_user_activity_end()
+
+    mock_ws.send.assert_not_awaited()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# VAD SERVER_VAD regression tests — ensure refactor preserved old behaviour
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+async def test_connect_qwen_server_vad_preserves_payload():
+    """Sanity check: SERVER_VAD path still sends the structured turn_detection dict."""
+    client = OmniRealtimeClient(
+        base_url="wss://example.test/realtime",
+        api_key="sk-test",
+        model="qwen-omni-turbo-realtime",
+        turn_detection_mode=TurnDetectionMode.SERVER_VAD,
+        api_type="qwen",
+    )
+    session = await _run_connect_and_capture_session(client)
+
+    assert session is not None
+    td = session.get("turn_detection")
+    assert isinstance(td, dict)
+    assert td.get("type") in ("server_vad", "semantic_vad")
+    assert "threshold" in td
+
+
+# ──────────────────────────────────────────────────────────────────────
+# The silence timeout is gated on the INFERRED api_type: an empty
+# api_type on a lanlan free route still resolves to 'free', and the auto
+# mic-off has to follow that inference like the rest of the class does.
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+def test_silence_timeout_uses_inferred_free_api_type():
+    client = OmniRealtimeClient(
+        base_url="wss://www.lanlan.tech/tts",
+        api_key="sk-test",
+        model="free-realtime",
+    )
+
+    assert client._api_type == ""
+    assert client._is_free_provider is True
+    assert client._enable_silence_timeout is True
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Regression: connect() must reset _has_server_vad to False in MANUAL
+# mode for every provider that defaults to server-VAD. Otherwise
+# stream_audio() and _check_silence_timeout() take the wrong branch
+# (stale _last_speech_time, false GLM/free auto-close, mis-applied
+# client-VAD suppression). Codex finding on PR #1128 (id 3181989081).
+# ──────────────────────────────────────────────────────────────────────
+
+
+# Provider matrix → (model, base_url, api_type, expected_default_has_vad).
+# expected_default_has_vad is what __init__ would set for SERVER_VAD on the
+# same constructor args; MANUAL must override to False regardless.
+_VAD_PROVIDER_MATRIX = [
+    # provider id, model, base_url, api_type, default_has_server_vad
+    ("qwen", "qwen-omni-turbo-realtime", "wss://example.test/realtime", "qwen", True),
+    ("openai", "gpt-realtime", "wss://api.openai.com/v1/realtime", "openai", True),
+    ("glm", "glm-realtime", "wss://example.test/realtime", "glm", True),
+    ("step", "step-1o-audio", "wss://example.test/realtime", "step", True),
+    # lanlan.tech (China free, StepFun proxy) — has server VAD by default
+    ("free_stepfun", "free-model", "wss://www.lanlan.tech/realtime", "free", True),
+    # lanlan.app (international free, Vertex Gemini proxy) — __init__ already
+    # treats this as client-VAD only (False), so MANUAL has nothing to flip.
+    # Included to verify we don't accidentally re-enable server VAD.
+    ("free_vertex", "free-model", "wss://www.lanlan.app/realtime", "free", False),
+]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    # NOTE: parameter renamed from ``base_url`` to ``ws_url`` to avoid
+    # collision with the session-scoped ``base_url`` fixture from
+    # pytest-base-url (otherwise pytest raises ScopeMismatch).
+    "provider_id,model,ws_url,api_type,default_has_vad",
+    _VAD_PROVIDER_MATRIX,
+    ids=[row[0] for row in _VAD_PROVIDER_MATRIX],
+)
+async def test_connect_manual_mode_resets_has_server_vad_for_all_providers(
+    provider_id, model, ws_url, api_type, default_has_vad,
+):
+    """MANUAL mode must force _has_server_vad=False for every websocket
+    provider, since connect() sends turn_detection=null and the provider
+    will not emit speech_started/stopped events.
+
+    Compares against the SERVER_VAD baseline to confirm the default
+    matches the codebase's __init__ heuristic, then asserts MANUAL flips
+    the flag to False post-connect().
+    """
+    # Baseline: SERVER_VAD client should keep the documented default.
+    server_vad_client = OmniRealtimeClient(
+        base_url=ws_url,
+        api_key="sk-test",
+        model=model,
+        turn_detection_mode=TurnDetectionMode.SERVER_VAD,
+        api_type=api_type,
+    )
+    assert server_vad_client._has_server_vad is default_has_vad, (
+        f"{provider_id}: SERVER_VAD default mismatch — fixture expectation "
+        f"is stale; expected {default_has_vad}, got {server_vad_client._has_server_vad}"
+    )
+
+    # MANUAL: pre-connect the flag matches __init__ default; post-connect
+    # it must be False regardless of provider default.
+    manual_client = _make_manual_client(model=model, base_url=ws_url, api_type=api_type)
+    assert manual_client._has_server_vad is default_has_vad, (
+        f"{provider_id}: pre-connect baseline drift"
+    )
+
+    await _run_connect_and_capture_session(manual_client)
+
+    assert manual_client._has_server_vad is False, (
+        f"{provider_id}: connect() MANUAL path must reset _has_server_vad to "
+        f"False so stream_audio/_check_silence_timeout pick the client-VAD "
+        f"branch (codex review id 3181989081)"
+    )
+
+
+@pytest.mark.unit
+async def test_connect_gemini_manual_mode_keeps_has_server_vad_false():
+    """Gemini path: __init__ already sets _has_server_vad=False (since
+    Gemini Live emits no speech_started/stopped). MANUAL path must not
+    accidentally flip it back to True. This guards the symmetry of the
+    fix across the websocket and Gemini connect paths.
+    """
+    pytest.importorskip("google.genai")
+
+    client = _make_manual_client(
+        model="gemini-2.0-flash-exp",
+        base_url="https://generativelanguage.googleapis.com",
+        api_type="gemini",
+    )
+    assert client._has_server_vad is False  # __init__ default for Gemini
+
+    fake_session = AsyncMock()
+    fake_ctx = AsyncMock()
+    fake_ctx.__aenter__ = AsyncMock(return_value=fake_session)
+    fake_ctx.__aexit__ = AsyncMock(return_value=False)
+    fake_genai_client = MagicMock()
+    fake_genai_client.aio.live.connect = MagicMock(return_value=fake_ctx)
+
+    with patch("main_logic.omni_realtime_client._gemini_support.genai") as mock_genai_module:
+        mock_genai_module.Client = MagicMock(return_value=fake_genai_client)
+        await client.connect(instructions="hi", native_audio=True)
+
+    assert client._has_server_vad is False
+
+
+@pytest.mark.unit
+async def test_connect_server_vad_mode_preserves_has_server_vad_default():
+    """SERVER_VAD path must NOT touch _has_server_vad — provider defaults
+    from __init__ heuristic carry through. Counter-test to the MANUAL
+    override above.
+    """
+    client = OmniRealtimeClient(
+        base_url="wss://example.test/realtime",
+        api_key="sk-test",
+        model="qwen-omni-turbo-realtime",
+        turn_detection_mode=TurnDetectionMode.SERVER_VAD,
+        api_type="qwen",
+    )
+    assert client._has_server_vad is True
+
+    await _run_connect_and_capture_session(client)
+
+    assert client._has_server_vad is True, (
+        "SERVER_VAD must not flip _has_server_vad — only MANUAL forces False"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Regression: connect() must validate turn_detection_mode BEFORE any
+# side effect (websocket open, _connect_gemini SDK init, silence-check
+# task spawn). CodeRabbit Major on PR #1128 (r3182466295): the original
+# check sat after websockets.connect() in the WebSocket branch and was
+# entirely bypassed by the early Gemini return — invalid modes either
+# leaked a half-open WebSocket or were silently accepted by Gemini.
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+async def test_connect_gemini_invalid_turn_detection_mode_raises_before_side_effects():
+    """Gemini path: an invalid turn_detection_mode must raise ValueError
+    BEFORE _connect_gemini runs. Pre-fix the early Gemini return bypassed
+    validation entirely, so this asserts the hoist actually covers the
+    Gemini branch (the WebSocket branch already threw, just too late).
+    """
+    pytest.importorskip("google.genai")
+
+    client = OmniRealtimeClient(
+        base_url="https://generativelanguage.googleapis.com",
+        api_key="sk-test",
+        model="gemini-2.0-flash-exp",
+        turn_detection_mode=TurnDetectionMode.SERVER_VAD,
+        api_type="gemini",
+    )
+    # Inject an invalid mode post-construction. The Enum has only two
+    # legal members so we use a sentinel object that fails the
+    # ``in (MANUAL, SERVER_VAD)`` membership check.
+    client.turn_detection_mode = "bogus_mode"
+
+    with patch.object(
+        client, "_connect_gemini", new_callable=AsyncMock
+    ) as mock_connect_gemini:
+        with pytest.raises(ValueError, match="Invalid turn detection mode"):
+            await client.connect(instructions="hi", native_audio=True)
+
+        mock_connect_gemini.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_connect_websocket_invalid_turn_detection_mode_raises_before_websocket_open():
+    """WebSocket path: validation hoist must fire before websockets.connect()
+    so we never leak a half-open socket on invalid mode.
+    """
+    client = OmniRealtimeClient(
+        base_url="wss://example.test/realtime",
+        api_key="sk-test",
+        model="qwen-omni-turbo-realtime",
+        turn_detection_mode=TurnDetectionMode.SERVER_VAD,
+        api_type="qwen",
+    )
+    client.turn_detection_mode = "bogus_mode"
+
+    with patch("websockets.connect", new_callable=AsyncMock) as mock_ws_connect:
+        with pytest.raises(ValueError, match="Invalid turn detection mode"):
+            await client.connect(instructions="hi", native_audio=True)
+
+        mock_ws_connect.assert_not_called()
+
+
+@pytest.mark.unit
+async def test_failed_websocket_connect_does_not_reset_response_arbiter():
+    client = _make_manual_client(
+        model="qwen-omni-turbo-realtime",
+        api_type="qwen",
+    )
+    client._response_arbiter.reset_connection_state = MagicMock()
+
+    with patch(
+        "websockets.connect",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("connect failed"),
+    ):
+        with pytest.raises(RuntimeError, match="connect failed"):
+            await client.connect(instructions="hi", native_audio=True)
+
+    client._response_arbiter.reset_connection_state.assert_not_called()
+    await client.close()
+
+
+@pytest.mark.unit
+async def test_successful_websocket_connect_resets_arbiter_after_socket_is_ready():
+    client = _make_manual_client(
+        model="qwen-omni-turbo-realtime",
+        api_type="qwen",
+    )
+    ws = AsyncMock()
+
+    def assert_socket_ready() -> None:
+        assert client.ws is ws
+
+    client._response_arbiter.reset_connection_state = MagicMock(
+        side_effect=assert_socket_ready
+    )
+    with patch("websockets.connect", new_callable=AsyncMock, return_value=ws):
+        await client.connect(instructions="hi", native_audio=True)
+
+    client._response_arbiter.reset_connection_state.assert_called_once_with()
+    await client.close()
+
+
+@pytest.mark.unit
+async def test_close_detaches_socket_before_awaiting_arbiter_shutdown():
+    client = _make_manual_client(
+        model="qwen-omni-turbo-realtime",
+        api_type="qwen",
+    )
+    ws = AsyncMock()
+    client.ws = ws
+    client._close_audio_processor = AsyncMock()
+
+    async def assert_socket_detached(_reason: str) -> None:
+        assert client.ws is None
+
+    client._response_arbiter.shutdown = AsyncMock(
+        side_effect=assert_socket_detached
+    )
+
+    await client.close()
+
+    client._response_arbiter.shutdown.assert_awaited_once_with(
+        "realtime client closed"
+    )
+    ws.close.assert_awaited_once_with()
+
+
+@pytest.mark.unit
+async def test_failed_transport_detaches_socket_before_arbiter_shutdown():
+    client = _make_manual_client(
+        model="qwen-omni-turbo-realtime",
+        api_type="qwen",
+    )
+    ws = AsyncMock()
+    client.ws = ws
+
+    async def assert_socket_detached(_reason: str) -> None:
+        assert client.ws is None
+
+    client._response_arbiter.shutdown = AsyncMock(
+        side_effect=assert_socket_detached
+    )
+
+    await client._close_failed_transport("transport failed")
+
+    assert client._fatal_error_occurred is True
+    client._response_arbiter.shutdown.assert_awaited_once_with(
+        "transport failed"
+    )
+    ws.close.assert_awaited_once_with()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Uplink sample rate — OpenAI Realtime PCM input only accepts 24kHz, every
+# other provider takes the internal 16kHz unchanged. The client keeps the
+# whole pipeline at 16kHz and upsamples to 24kHz only at the send boundary
+# (and only for gpt models). See OmniRealtimeClient._resample_uplink.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _make_server_vad_client(model: str, api_type: str = "", base_url: str = "wss://example.test/realtime"):
+    return OmniRealtimeClient(
+        base_url=base_url,
+        api_key="sk-test",
+        model=model,
+        turn_detection_mode=TurnDetectionMode.SERVER_VAD,
+        api_type=api_type,
+    )
+
+
+def _gemini_response(**server_fields):
+    defaults = {
+        "input_transcription": None,
+        "output_transcription": None,
+        "model_turn": None,
+        "turn_complete": False,
+        "interrupted": False,
+    }
+    defaults.update(server_fields)
+    return SimpleNamespace(
+        tool_call=None,
+        server_content=SimpleNamespace(**defaults),
+    )
+
+
+def _gemini_output_text(text: str):
+    return SimpleNamespace(text=text)
+
+
+def _gemini_input_text(text: str):
+    return SimpleNamespace(text=text)
+
+
+def _gemini_model_turn_audio(data: bytes = b"audio"):
+    return SimpleNamespace(
+        parts=[
+            SimpleNamespace(
+                inline_data=SimpleNamespace(data=data),
+                thought=False,
+            )
+        ]
+    )
+
+
+@pytest.mark.unit
+async def test_gemini_interruption_clears_on_true_new_turn():
+    client = _make_server_vad_client(
+        model="gemini-2.0-flash-exp",
+        api_type="gemini",
+        base_url="https://generativelanguage.googleapis.com",
+    )
+    client.on_input_transcript = AsyncMock()
+    client.on_new_message = AsyncMock()
+    client.on_text_delta = AsyncMock()
+    client.on_audio_delta = AsyncMock()
+
+    client._gemini_user_transcript = "hello"
+    await client._process_gemini_response(_gemini_response(interrupted=True))
+
+    assert client._interrupted is True
+    client.on_input_transcript.assert_awaited_once_with("hello")
+
+    await client._process_gemini_response(
+        _gemini_response(input_transcription=_gemini_input_text("next question"))
+    )
+
+    client._ai_recent_activity_time = time.time() - 0.5
+    client._user_recent_activity_time = time.time()
+    await client._process_gemini_response(
+        _gemini_response(
+            output_transcription=_gemini_output_text("hi"),
+            model_turn=_gemini_model_turn_audio(b"pcm"),
+        )
+    )
+
+    assert client._interrupted is False
+    assert client.on_input_transcript.await_count == 2
+    client.on_input_transcript.assert_awaited_with("next question")
+    client.on_new_message.assert_awaited_once()
+    client.on_text_delta.assert_awaited_once_with("hi", True)
+    client.on_audio_delta.assert_awaited_once_with(b"pcm")
+
+
+@pytest.mark.unit
+async def test_gemini_interrupted_late_continuation_stays_suppressed():
+    client = _make_server_vad_client(
+        model="gemini-2.0-flash-exp",
+        api_type="gemini",
+        base_url="https://generativelanguage.googleapis.com",
+    )
+    client.on_new_message = AsyncMock()
+    client.on_text_delta = AsyncMock()
+    client.on_audio_delta = AsyncMock()
+
+    client._interrupted = True
+    client._is_responding = False
+    client._ai_recent_activity_time = time.time()
+    client._user_recent_activity_time = client._ai_recent_activity_time - 1
+
+    await client._process_gemini_response(
+        _gemini_response(
+            output_transcription=_gemini_output_text("late"),
+            model_turn=_gemini_model_turn_audio(b"late-audio"),
+        )
+    )
+
+    assert client._interrupted is True
+    client.on_new_message.assert_not_awaited()
+    client.on_text_delta.assert_not_awaited()
+    client.on_audio_delta.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_gemini_interrupted_user_audio_without_transcript_stays_suppressed():
+    client = _make_server_vad_client(
+        model="gemini-2.0-flash-exp",
+        api_type="gemini",
+        base_url="https://generativelanguage.googleapis.com",
+    )
+    client.on_new_message = AsyncMock()
+    client.on_text_delta = AsyncMock()
+    client.on_audio_delta = AsyncMock()
+
+    client._interrupted = True
+    client._is_responding = False
+    client._ai_recent_activity_time = time.time() - 0.5
+    client._user_recent_activity_time = time.time()
+
+    await client._process_gemini_response(
+        _gemini_response(
+            output_transcription=_gemini_output_text("canceled tail"),
+            model_turn=_gemini_model_turn_audio(b"canceled-tail-audio"),
+        )
+    )
+
+    assert client._interrupted is True
+    client.on_new_message.assert_not_awaited()
+    client.on_text_delta.assert_not_awaited()
+    client.on_audio_delta.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_gemini_interrupted_same_event_transcript_allows_next_turn():
+    client = _make_server_vad_client(
+        model="gemini-2.0-flash-exp",
+        api_type="gemini",
+        base_url="https://generativelanguage.googleapis.com",
+    )
+    client.on_input_transcript = AsyncMock()
+    client.on_new_message = AsyncMock()
+    client.on_text_delta = AsyncMock()
+    client.on_audio_delta = AsyncMock()
+
+    await client._process_gemini_response(
+        _gemini_response(
+            input_transcription=_gemini_input_text("barge in"),
+            interrupted=True,
+        )
+    )
+
+    assert client._interrupted is True
+    assert client._gemini_user_transcript_after_interrupt is True
+    client.on_input_transcript.assert_awaited_once_with("barge in")
+
+    client._ai_recent_activity_time = time.time() - 0.5
+    client._user_recent_activity_time = time.time()
+    await client._process_gemini_response(
+        _gemini_response(
+            output_transcription=_gemini_output_text("next"),
+            model_turn=_gemini_model_turn_audio(b"next-audio"),
+        )
+    )
+
+    assert client._interrupted is False
+    assert client._gemini_user_transcript_after_interrupt is False
+    client.on_new_message.assert_awaited_once()
+    client.on_text_delta.assert_awaited_once_with("next", True)
+    client.on_audio_delta.assert_awaited_once_with(b"next-audio")
+
+
+@pytest.mark.unit
+def test_uplink_rate_gpt_is_24k_with_resampler():
+    """gpt models must target a 24kHz uplink and own a stream resampler."""
+    client = _make_server_vad_client(model="gpt-realtime", api_type="openai")
+    assert client._uplink_sample_rate == 24000
+    assert client._uplink_resampler is not None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "model,api_type",
+    [
+        ("qwen-omni-turbo-realtime", "qwen"),
+        ("glm-realtime", "glm"),
+        ("step-1o-audio", "step"),
+        ("grok-realtime", "grok"),
+        ("free-model", "free"),
+    ],
+)
+def test_uplink_rate_non_gpt_is_16k_no_resampler(model, api_type):
+    """Every 16kHz-native provider keeps rate=16000 and no resampler, so the
+    uplink resample path is fully short-circuited (zero behaviour change)."""
+    client = _make_server_vad_client(model=model, api_type=api_type)
+    assert client._uplink_sample_rate == 16000
+    assert client._uplink_resampler is None
+
+
+@pytest.mark.unit
+async def test_stream_audio_gpt_upsamples_16k_to_24k():
+    """A 16kHz chunk sent through a gpt client must reach the wire as ~1.5×
+    the samples (24kHz). Without this OpenAI reads our 16k bytes as 24k and
+    the model hears 1.5× speed-shifted audio."""
+    import numpy as np
+
+    client = _make_server_vad_client(model="gpt-realtime", api_type="openai")
+    sent: list[dict] = []
+
+    async def fake_send(payload):
+        sent.append(json.loads(payload))
+
+    client.ws = AsyncMock()
+    client.ws.send = AsyncMock(side_effect=fake_send)
+
+    # 1 second of 16kHz PCM16 (16000 samples → 32000 bytes). A full second
+    # dwarfs the resampler's FIR latency so the ratio lands cleanly on ~1.5.
+    in_samples = 16000
+    chunk = (np.zeros(in_samples, dtype=np.int16)).tobytes()
+    await client.stream_audio(chunk)
+
+    appends = [e for e in sent if e.get("type") == "input_audio_buffer.append"]
+    assert appends, "no input_audio_buffer.append emitted"
+    out_bytes = base64.b64decode(appends[0]["audio"])
+    out_samples = len(out_bytes) // 2
+    ratio = out_samples / in_samples
+    assert 1.4 < ratio < 1.6, f"expected ~1.5× (24k/16k) upsample, got {ratio:.3f}"
+
+
+@pytest.mark.unit
+async def test_stream_audio_non_gpt_passes_16k_through_unchanged():
+    """A 16kHz chunk through a 16k-native provider must reach the wire byte-
+    identical — the resample helper is a no-op when _uplink_resampler is None."""
+    import numpy as np
+
+    client = _make_server_vad_client(model="qwen-omni-turbo-realtime", api_type="qwen")
+    sent: list[dict] = []
+
+    async def fake_send(payload):
+        sent.append(json.loads(payload))
+
+    client.ws = AsyncMock()
+    client.ws.send = AsyncMock(side_effect=fake_send)
+
+    # 512 samples @16k = 1024 bytes — not the 480-sample RNNoise frame, so it
+    # bypasses AudioProcessor and should pass straight through.
+    chunk = np.arange(512, dtype=np.int16).tobytes()
+    await client.stream_audio(chunk)
+
+    appends = [e for e in sent if e.get("type") == "input_audio_buffer.append"]
+    assert appends, "no input_audio_buffer.append emitted"
+    assert base64.b64decode(appends[0]["audio"]) == chunk
+
+
+@pytest.mark.unit
+async def test_connect_gpt_session_declares_24k_pcm_input_format():
+    """gpt session.update must declare audio.input.format = audio/pcm @24kHz
+    so the server interprets our upsampled bytes at the correct rate."""
+    client = _make_server_vad_client(
+        model="gpt-realtime",
+        api_type="openai",
+        base_url="wss://api.openai.com/v1/realtime",
+    )
+    session = await _run_connect_and_capture_session(client)
+
+    assert session is not None
+    fmt = session.get("audio", {}).get("input", {}).get("format")
+    assert fmt == {"type": "audio/pcm", "rate": 24000}, f"got {fmt!r}"
+
+
+@pytest.mark.unit
+async def test_clear_audio_buffer_drops_uplink_resampler_tail_for_gpt():
+    """clear_audio_buffer must also clear the uplink resampler. soxr holds
+    ~21ms of FIR tail; on a server-buffer clear (e.g. 4s-silence reset) that
+    tail must be dropped, not prepended to the next utterance."""
+    from unittest.mock import MagicMock
+
+    client = _make_server_vad_client(model="gpt-realtime", api_type="openai")
+    client.ws = AsyncMock()
+    fake_resampler = MagicMock()
+    client._uplink_resampler = fake_resampler
+
+    await client.clear_audio_buffer()
+
+    fake_resampler.clear.assert_called_once()
+
+
+@pytest.mark.unit
+async def test_signal_user_activity_end_gpt_manual_clears_uplink_resampler():
+    """MANUAL commit excludes soxr's held ~21ms tail; that tail must be
+    dropped so it isn't carried into the next turn (Codex P2 on PR #1644)."""
+    from unittest.mock import MagicMock
+
+    client = _make_manual_client(
+        model="gpt-realtime",
+        base_url="wss://api.openai.com/v1/realtime",
+        api_type="openai",
+    )
+    sent: list[dict] = []
+
+    async def fake_send(payload):
+        try:
+            sent.append(json.loads(payload))
+        except json.JSONDecodeError:
+            # Why: payload may be bytes audio frames, not JSON — ignore non-JSON in this collector.
+            pass
+
+    client.ws = AsyncMock()
+    client.ws.send = AsyncMock(side_effect=fake_send)
+    fake_resampler = MagicMock()
+    client._uplink_resampler = fake_resampler
+
+    await client.signal_user_activity_end()
+
+    types_sent = [e.get("type") for e in sent]
+    assert "input_audio_buffer.commit" in types_sent
+    assert "response.create" in types_sent
+    fake_resampler.clear.assert_called_once()

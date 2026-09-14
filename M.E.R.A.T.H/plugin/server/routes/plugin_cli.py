@@ -1,0 +1,557 @@
+from __future__ import annotations
+
+from typing import Literal
+
+import asyncio
+
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field, model_validator
+
+from plugin.logging_config import get_logger
+from plugin.server.application.plugin_cli import PluginCliService
+from plugin.server.domain.errors import ServerDomainError
+from plugin.server.infrastructure.auth import require_admin
+from plugin.server.infrastructure.error_mapping import raise_http_from_domain
+
+router = APIRouter()
+logger = get_logger("server.routes.plugin_cli")
+service = PluginCliService()
+
+
+class PluginCliPluginRef(BaseModel):
+    root_id: str = Field(pattern="^(builtin|user)$")
+    directory_name: str
+
+
+class PluginCliPluginRefResponse(PluginCliPluginRef):
+    plugin_id: str = ""
+    label: str = ""
+
+
+class PluginCliDevelopmentRef(BaseModel):
+    registration_id: str = Field(min_length=1)
+    revision: int = Field(ge=1)
+
+
+class PluginCliBuildRequest(BaseModel):
+    mode: str = Field(default="selected", pattern="^(selected|single|bundle|all)$")
+    plugin: str | None = None
+    plugins: list[str] = Field(default_factory=list)
+    plugin_ref: PluginCliPluginRef | None = None
+    plugin_refs: list[PluginCliPluginRef] = Field(default_factory=list)
+    development_ref: PluginCliDevelopmentRef | None = None
+    development_refs: list[PluginCliDevelopmentRef] = Field(default_factory=list)
+    out: str | None = None
+    target_dir: str | None = None
+    keep_staging: bool = False
+    bundle_id: str | None = None
+    package_name: str | None = None
+    package_description: str | None = None
+    version: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_mode_payload(self) -> "PluginCliBuildRequest":
+        if self.mode == "single" and not (self.plugin_ref or self.plugin or self.development_ref):
+            raise ValueError("plugin_ref or plugin is required when mode=single")
+        if self.mode in {"selected", "bundle"} and not (self.plugin_refs or self.plugins or self.development_refs):
+            raise ValueError("plugin_refs or plugins is required when mode=selected or mode=bundle")
+        if self.development_ref and self.mode != "single":
+            raise ValueError("development_ref requires mode=single")
+        if self.development_refs and self.mode not in {"selected", "bundle"}:
+            raise ValueError("development_refs requires mode=selected or mode=bundle")
+        if self.development_ref and (self.plugin or self.plugin_ref):
+            raise ValueError("A single build accepts exactly one source")
+        return self
+
+
+class PluginCliPackageRequest(BaseModel):
+    package: str
+
+
+class PluginCliInstallRequest(BaseModel):
+    package: str
+    plugins_root: str | None = None
+    profiles_root: str | None = None
+    on_conflict: str = Field(default="fail", pattern="^fail$")
+    install_source: Literal["imported"] | None = None
+    confirm_upgrade: bool = False
+    confirmation_token: str | None = None
+
+
+class PluginCliInstallPlanRequest(BaseModel):
+    package: str
+    plugins_root: str | None = None
+    profiles_root: str | None = None
+
+
+class PluginCliInstallPlanResponse(BaseModel):
+    action: str = Field(
+        pattern="^(install|upgrade|reinstall|downgrade|override_builtin|blocked)$"
+    )
+    package_type: str = Field(pattern="^(plugin|bundle)$")
+    plugin_id: str
+    directory_name: str
+    current_version: str = ""
+    target_version: str = ""
+    confirmation_token: str = ""
+    reason: str = ""
+    legacy_plugin_ids: list[str] = Field(default_factory=list)
+    current_source: str = ""
+    target_source: str = ""
+
+
+class PluginCliAnalyzeRequest(BaseModel):
+    plugins: list[str] = Field(default_factory=list)
+    plugin_refs: list[PluginCliPluginRef] = Field(default_factory=list)
+    current_sdk_version: str | None = None
+
+
+class PluginCliPluginListResponse(BaseModel):
+    plugins: list[str]
+    plugin_refs: list[PluginCliPluginRefResponse] = Field(default_factory=list)
+    count: int
+
+
+class PluginCliLocalPackageItem(BaseModel):
+    name: str
+    path: str
+    suffix: str
+    size_bytes: int
+    modified_at: str
+
+
+class PluginCliPackageListResponse(BaseModel):
+    packages: list[PluginCliLocalPackageItem]
+    count: int
+    target_dir: str
+
+
+class PluginCliBuildFailure(BaseModel):
+    plugin: str
+    error: str
+
+
+class PluginCliBuildResultResponse(BaseModel):
+    plugin_id: str
+    package_type: str
+    plugin_ids: list[str]
+    package_name: str = ""
+    version: str = ""
+    package_path: str
+    staging_dir: str | None = None
+    profile_files: list[str]
+    staged_files: list[str]
+    payload_hash: str
+    package_size_bytes: int
+    staged_file_count: int
+    profile_file_count: int
+    plugin_count: int
+
+
+class PluginCliBuildResponse(BaseModel):
+    built: list[PluginCliBuildResultResponse]
+    built_count: int
+    failed: list[PluginCliBuildFailure]
+    failed_count: int
+    ok: bool
+
+
+class PluginCliInspectedPluginResponse(BaseModel):
+    plugin_id: str
+    archive_path: str
+    has_plugin_toml: bool
+
+
+class PluginCliDependencyPluginResponse(BaseModel):
+    plugin_id: str
+    python_requirements: list[str]
+    host_python_requirements: list[str]
+    plugin_dependencies: list[str]
+    advanced_plugin_dependencies: list[dict[str, object]]
+    vendor_path: str = ""
+    vendor_present: bool = False
+
+
+class PluginCliDependencySummaryResponse(BaseModel):
+    schema_version: str = ""
+    plugins: list[PluginCliDependencyPluginResponse]
+    plugin_count: int
+
+
+class PluginCliInspectResponse(BaseModel):
+    package_path: str
+    package_type: str
+    package_id: str
+    schema_version: str = ""
+    package_name: str = ""
+    package_description: str = ""
+    version: str = ""
+    metadata_found: bool
+    payload_hash: str = ""
+    payload_hash_verified: bool | None = None
+    plugins: list[PluginCliInspectedPluginResponse]
+    profile_names: list[str]
+    plugin_count: int
+    profile_count: int
+    dependencies: PluginCliDependencySummaryResponse | None = None
+
+
+class PluginCliVerifyResponse(PluginCliInspectResponse):
+    ok: bool
+
+
+class PluginCliInstalledPluginResponse(BaseModel):
+    source_folder: str
+    target_plugin_id: str
+    target_dir: str
+    renamed: bool
+
+
+class PluginCliInstallResponse(BaseModel):
+    package_path: str
+    package_type: str
+    package_id: str
+    plugins_root: str
+    profiles_root: str | None = None
+    installed_plugins: list[PluginCliInstalledPluginResponse]
+    profile_dir: str | None = None
+    profile_reused: bool = False
+    metadata_found: bool
+    payload_hash: str = ""
+    payload_hash_verified: bool | None = None
+    conflict_strategy: str
+    installed_plugin_count: int
+    operation: str = "install"
+    restarted: bool = False
+    rollback_status: str = "not_needed"
+    install_source_warning: str | None = None
+
+
+class PluginCliSharedDependencyResponse(BaseModel):
+    name: str
+    plugin_ids: list[str]
+    requirement_texts: dict[str, str]
+    plugin_count: int
+
+
+class PluginCliBundleSdkAnalysisResponse(BaseModel):
+    kind: str
+    plugin_specifiers: dict[str, str]
+    has_overlap: bool
+    matching_versions: list[str]
+    current_sdk_version: str = ""
+    current_sdk_supported_by_all: bool | None = None
+
+
+class PluginCliAnalyzeResponse(BaseModel):
+    plugin_ids: list[str]
+    shared_dependencies: list[PluginCliSharedDependencyResponse]
+    common_dependencies: list[PluginCliSharedDependencyResponse]
+    sdk_supported_analysis: PluginCliBundleSdkAnalysisResponse | None = None
+    sdk_recommended_analysis: PluginCliBundleSdkAnalysisResponse | None = None
+    plugin_count: int
+
+
+class PluginCliUploadResponse(BaseModel):
+    name: str
+    path: str
+    size_bytes: int
+    modified_at: str
+
+
+class PluginCliDiscardUploadResponse(BaseModel):
+    success: bool
+    removed: bool
+    name: str
+
+
+class PluginCliUploadAndInstallResponse(BaseModel):
+    upload: PluginCliUploadResponse
+    install: PluginCliInstallResponse
+    install_source_warning: str | None = None
+
+
+@router.get("/plugin-cli/plugins", response_model=PluginCliPluginListResponse)
+async def list_plugin_cli_plugins(_: str = require_admin) -> dict[str, object]:
+    try:
+        return await service.list_local_plugins()
+    except ServerDomainError as error:
+        raise_http_from_domain(error, logger=logger)
+
+
+@router.get("/plugin-cli/packages", response_model=PluginCliPackageListResponse)
+async def list_plugin_cli_packages(_: str = require_admin) -> dict[str, object]:
+    try:
+        return await service.list_local_packages()
+    except ServerDomainError as error:
+        raise_http_from_domain(error, logger=logger)
+
+
+@router.post("/plugin-cli/build", response_model=PluginCliBuildResponse)
+async def plugin_cli_build(
+    payload: PluginCliBuildRequest,
+    request: Request,
+    _: str = require_admin,
+) -> dict[str, object]:
+    try:
+        from plugin.server.application.plugin_cli.development_build import resolve_development_sources
+        from plugin.server.infrastructure.development_access import require_development_access
+
+        allow_development = bool(payload.development_ref or payload.development_refs)
+        development_unavailable = False
+        if payload.mode == "all":
+            try:
+                allow_development = bool(await asyncio.to_thread(resolve_development_sources, "all", None, []))
+            except ServerDomainError as error:
+                if error.code != "DEVELOPMENT_STORE_INVALID":
+                    raise
+                # Keep this dispatch confined to managed roots, even if the
+                # optional store is repaired before the worker starts.
+                development_unavailable = True
+        if allow_development:
+            require_development_access(request)
+        result = await service.build(
+            mode=payload.mode,
+            plugin=payload.plugin,
+            plugins=payload.plugins,
+            plugin_ref=payload.plugin_ref.model_dump() if payload.plugin_ref else None,
+            plugin_refs=[item.model_dump() for item in payload.plugin_refs],
+            development_ref=payload.development_ref.model_dump() if payload.development_ref else None,
+            development_refs=[item.model_dump() for item in payload.development_refs],
+            allow_development=allow_development,
+            out=payload.out,
+            target_dir=payload.target_dir,
+            keep_staging=payload.keep_staging,
+            bundle_id=payload.bundle_id,
+            package_name=payload.package_name,
+            package_description=payload.package_description,
+            version=payload.version,
+        )
+        if development_unavailable:
+            failed = [*result["failed"], {
+                "plugin": "development",
+                "error": "Development registrations are unavailable; development sources were skipped",
+            }]
+            result = {**result, "failed": failed, "failed_count": len(failed), "ok": False}
+        return result
+    except ServerDomainError as error:
+        raise_http_from_domain(error, logger=logger)
+
+
+@router.post("/plugin-cli/inspect", response_model=PluginCliInspectResponse)
+async def plugin_cli_inspect(
+    payload: PluginCliPackageRequest,
+    _: str = require_admin,
+) -> dict[str, object]:
+    try:
+        return await service.inspect(package=payload.package)
+    except ServerDomainError as error:
+        raise_http_from_domain(error, logger=logger)
+
+
+@router.post("/plugin-cli/verify", response_model=PluginCliVerifyResponse)
+async def plugin_cli_verify(
+    payload: PluginCliPackageRequest,
+    _: str = require_admin,
+) -> dict[str, object]:
+    try:
+        return await service.verify(package=payload.package)
+    except ServerDomainError as error:
+        raise_http_from_domain(error, logger=logger)
+
+
+@router.post("/plugin-cli/install", response_model=PluginCliInstallResponse)
+async def plugin_cli_install(
+    payload: PluginCliInstallRequest,
+    _: str = require_admin,
+) -> dict[str, object]:
+    try:
+        return await service.install(
+            package=payload.package,
+            plugins_root=payload.plugins_root,
+            profiles_root=payload.profiles_root,
+            on_conflict=payload.on_conflict,
+            install_source=payload.install_source,
+            confirm_upgrade=payload.confirm_upgrade,
+            confirmation_token=payload.confirmation_token,
+        )
+    except ServerDomainError as error:
+        raise_http_from_domain(
+            error,
+            logger=logger,
+            include_details=error.code == "PLUGIN_UPGRADE_ROLLED_BACK",
+        )
+
+
+@router.post("/plugin-cli/install-plan", response_model=PluginCliInstallPlanResponse)
+async def plugin_cli_install_plan(
+    payload: PluginCliInstallPlanRequest,
+    _: str = require_admin,
+) -> dict[str, object]:
+    try:
+        return await service.plan_install(
+            package=payload.package,
+            plugins_root=payload.plugins_root,
+            profiles_root=payload.profiles_root,
+        )
+    except ServerDomainError as error:
+        raise_http_from_domain(error, logger=logger)
+
+
+@router.post("/plugin-cli/analyze", response_model=PluginCliAnalyzeResponse)
+async def plugin_cli_analyze(
+    payload: PluginCliAnalyzeRequest,
+    _: str = require_admin,
+) -> dict[str, object]:
+    try:
+        return await service.analyze(
+            plugins=payload.plugins,
+            plugin_refs=[item.model_dump() for item in payload.plugin_refs],
+            current_sdk_version=payload.current_sdk_version,
+        )
+    except ServerDomainError as error:
+        raise_http_from_domain(error, logger=logger)
+
+
+# ── Upload & Download ──────────────────────────────────────────────────
+
+
+@router.post("/plugin-cli/upload", response_model=PluginCliUploadResponse)
+async def plugin_cli_upload(
+    file: UploadFile = File(...),
+    _: str = require_admin,
+) -> dict[str, object]:
+    """Upload a plugin package file (.neko-plugin / .neko-bundle) to the server.
+
+    The file is saved to the packages target directory and can subsequently be
+    passed to ``/plugin-cli/install`` or ``/plugin-cli/inspect``.
+    """
+    try:
+        await file.seek(0)
+        return await service.save_uploaded_file(
+            filename=file.filename or "unknown.neko-plugin",
+            source_file=file.file,
+        )
+    except ServerDomainError as error:
+        raise_http_from_domain(error, logger=logger)
+    except Exception:
+        logger.exception("Unexpected error during plugin package upload")
+        raise HTTPException(status_code=500, detail="Internal server error during upload")
+
+
+@router.delete("/plugin-cli/upload", response_model=PluginCliDiscardUploadResponse)
+async def plugin_cli_discard_upload(
+    package: str = Query(...),
+    _: str = require_admin,
+) -> dict[str, object]:
+    """Discard one package uploaded by an abandoned local import workflow."""
+    try:
+        return await service.discard_uploaded_package(package=package)
+    except ServerDomainError as error:
+        raise_http_from_domain(error, logger=logger)
+
+
+@router.post("/plugin-cli/upload-and-install", response_model=PluginCliUploadAndInstallResponse)
+async def plugin_cli_upload_and_install(
+    file: UploadFile = File(...),
+    on_conflict: str = Query(default="fail", pattern="^fail$"),
+    _: str = require_admin,
+) -> dict[str, object]:
+    """Upload a plugin package and immediately install it.
+
+    Combines upload + install into a single request for convenience.
+    """
+    try:
+        await file.seek(0)
+        uploaded = await service.save_uploaded_file(
+            filename=file.filename or "unknown.neko-plugin",
+            source_file=file.file,
+        )
+        return await service.upload_and_install(
+            filename=str(uploaded["name"]),
+            package_path=str(uploaded["path"]),
+            on_conflict=on_conflict,
+        )
+    except ServerDomainError as error:
+        raise_http_from_domain(error, logger=logger)
+    except Exception:
+        logger.exception("Unexpected error during plugin package upload-and-install")
+        raise HTTPException(status_code=500, detail="Internal server error during upload-and-install")
+
+
+@router.get("/plugin-cli/download")
+async def plugin_cli_download(
+    package: str = Query(..., description="Package filename or path within the target directory"),
+    _: str = require_admin,
+) -> FileResponse:
+    """Download a plugin package file from the server."""
+    try:
+        resolved = service.resolve_download_path(package)
+        return FileResponse(
+            str(resolved),
+            filename=resolved.name,
+            media_type="application/octet-stream",
+        )
+    except ServerDomainError as error:
+        raise_http_from_domain(error, logger=logger)
+
+
+# ── Legacy route aliases (backward compatibility with existing frontend) ──
+
+
+@router.post("/plugin-cli/pack", include_in_schema=False)
+async def plugin_cli_pack_legacy(
+    payload: PluginCliBuildRequest,
+    request: Request,
+    _: str = require_admin,
+) -> dict[str, object]:
+    """Legacy alias for /plugin-cli/build. Translates response keys."""
+    result = await plugin_cli_build(payload, request, _)
+    # Translate new keys to legacy keys expected by frontend
+    if isinstance(result, dict):
+        translated = dict(result)
+        if "built" in translated:
+            translated["packed"] = translated.pop("built")
+        if "built_count" in translated:
+            translated["packed_count"] = translated.pop("built_count")
+        return translated
+    return result
+
+
+@router.post("/plugin-cli/unpack", include_in_schema=False)
+async def plugin_cli_unpack_legacy(
+    payload: PluginCliInstallRequest,
+    _: str = require_admin,
+) -> dict[str, object]:
+    """Legacy alias for /plugin-cli/install. Translates response keys."""
+    result = await plugin_cli_install(payload, _)
+    # Translate new keys to legacy keys expected by frontend
+    if isinstance(result, dict):
+        translated = dict(result)
+        if "installed_plugins" in translated:
+            translated["unpacked_plugins"] = translated.pop("installed_plugins")
+        if "installed_plugin_count" in translated:
+            translated["unpacked_plugin_count"] = translated.pop("installed_plugin_count")
+        return translated
+    return result
+
+
+@router.post("/plugin-cli/upload-and-unpack", include_in_schema=False)
+async def plugin_cli_upload_and_unpack_legacy(
+    file: UploadFile = File(...),
+    on_conflict: str = Query(default="fail", pattern="^fail$"),
+    _: str = require_admin,
+) -> dict[str, object]:
+    """Legacy alias for /plugin-cli/upload-and-install. Translates response keys."""
+    result = await plugin_cli_upload_and_install(file, on_conflict=on_conflict, _=_)
+    # Translate nested install keys
+    if isinstance(result, dict) and isinstance(result.get("install"), dict):
+        install = dict(result["install"])
+        if "installed_plugins" in install:
+            install["unpacked_plugins"] = install.pop("installed_plugins")
+        if "installed_plugin_count" in install:
+            install["unpacked_plugin_count"] = install.pop("installed_plugin_count")
+        result = {key: value for key, value in result.items() if key != "install"}
+        result["unpack"] = install
+    return result

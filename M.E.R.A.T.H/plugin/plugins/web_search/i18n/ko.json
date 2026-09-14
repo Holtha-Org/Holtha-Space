@@ -1,0 +1,4 @@
+{
+  "plugin.name": "웹 검색",
+  "plugin.description": "AnySearch를 우선 사용하는 웹 검색입니다. 사용자 IP를 기준으로 지역을 선택하며, API 키는 선택 사항이고 실패 시 Baidu 또는 DuckDuckGo로 대체합니다"
+}

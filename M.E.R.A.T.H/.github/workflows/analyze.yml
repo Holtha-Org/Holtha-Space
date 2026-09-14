@@ -1,0 +1,341 @@
+name: Analyze
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Static-check jobs only need to read the checked-out source.
+permissions:
+  contents: read
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Five parallel jobs, split by concern so a failing check name points at a
+# category (expand it to see which step is red) instead of one giant title
+# enumerating every sub-check:
+#
+#   Ruff                   → the ruff linter (its own deps: uv + ruff)
+#   Code safety            → runtime hazards in the backend (blocking-in-async,
+#                            banned imports, startup import cost)
+#   Prompts & i18n         → LLM-call discipline + localization/docstring rules
+#   API & layering         → HTTP/route + module-layer architecture rules
+#   Core package contracts → the main_logic/core mixin/facade structural gate
+#
+# All run in parallel, all block merge, each is independently re-runnable. Only
+# the diff-based steps (i18n-sync, docstring-cjk) need full history; the rest
+# run on a shallow checkout.
+# ─────────────────────────────────────────────────────────────────────────────
+
+jobs:
+  ruff:
+    name: Ruff
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install ruff
+        # ruff is the only dev dep we need; a full uv sync pulls heavy native
+        # extensions (playwright, numpy, etc.) unnecessary for static checks.
+        run: uv tool install ruff==0.15.4
+
+      - name: ruff check (incl. ASYNC210/220/221/222/251)
+        run: ruff check .
+
+  code-safety:
+    name: Code safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Forbid blocking calls in async def bodies
+        # Custom AST checker, broader than ruff's ASYNC* rules:
+        #   * gaps flake8-async doesn't catch: Thread/Process.join,
+        #     queue.Queue.get, raw socket recv/accept/connect
+        #   * extra blocking stdlib/3p calls: PIL.Image.open,
+        #     pyautogui.screenshot, Fernet encrypt/decrypt, shutil.*,
+        #     json.load, plus bare-import forms (sleep, rmtree, urlopen)
+        #   * depth-1 transitive: a sync helper whose body hits any of the
+        #     above, called directly from async, is also flagged.
+        run: python scripts/check_async_blocking.py
+
+      - name: Forbid loguru / structlog / logbook imports
+        # Logging is unified through utils.logger_config (RobustLoggerConfig).
+        # Re-introducing a third-party logging frontend fragments the surface
+        # (formatter, sinks, file naming, multi-process behaviour) and breaks
+        # plugin/main parity. This check fails the build on any such import.
+        run: python scripts/check_no_loguru.py
+
+      - name: Forbid `tkinter` imports
+        # Architecture rule: frontend/backend are split, ALL GUI operations
+        # belong on the Electron frontend (Node.js renderer/main), not the
+        # Python backend. The backend is a headless HTTP/async service —
+        # it must stay relocatable (remote deployment, headless CI) and
+        # not own a Tcl/Tk event loop. Past incident: PR #1014's Windows
+        # tk screenshot overlay crashed the whole app under Nuitka builds
+        # without `--enable-plugin=tk-inter` (SystemExit from tk.Tk()
+        # escaped the asyncio worker, killed uvicorn). For dialogs use
+        # Electron's `dialog` (or platform-native shell bridges in
+        # storage_location_router.py); for screenshot framing use
+        # Electron's desktopCapturer region path.
+        run: python scripts/check_no_tkinter.py
+
+      - name: Forbid `temperature=` kwargs on LLM client calls (memory + utils)
+        # Project policy: do NOT pass `temperature=` to create_chat_llm /
+        # ChatOpenAI / wrappers in memory_server.py + memory/ + utils/. The
+        # default (None) omits the field — required for o1/o3/gpt-5-thinking/
+        # Claude extended-thinking, and avoids per-call-site temperature drift
+        # across memory tasks. See memory/__init__.py and .agent/rules/
+        # neko-guide.md for the rationale.
+        run: python scripts/check_no_temperature.py
+
+      - name: Keep heavy SDKs off the startup import chain (lazy-import contract)
+        # Merged production mode imports the app tree serially before any port
+        # binds, so a module-scope `import openai` (etc.) slows EVERY launch,
+        # silently — reference incident: #1496 cut main_server import to ~0.6s,
+        # openai 2.x types growth quietly ate it back to ~2.1s within 6 weeks.
+        # Banned-at-module-scope list (openai/anthropic/bs4/bilibili_api/
+        # google.genai/translatepy/dashscope/...) lives in the script; the
+        # sanctioned pattern is in-function import + utils/module_warmup.py
+        # background pre-import after ready. `# noqa: STARTUP_LAZY_IMPORT`
+        # opts out with justification.
+        run: python scripts/check_startup_import_lazy.py
+
+  prompts-i18n:
+    name: Prompts & i18n
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # i18n-sync / docstring-cjk are diff-based and need full history to
+          # diff against the merge-base of origin/main. The other steps don't
+          # care, but fetch-depth: 0 has negligible cost on this repo.
+          #
+          # The checkout@v5 bump also fixes a credential-handling regression the
+          # old @v4 tripped against the runner's git 2.54 on the full-history
+          # fetch ("could not read Username", git exit 128).
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Enforce prompt-i18n conventions (inline-EN-only + multilang-in-config)
+        # Two rules in one walker:
+        #   - INLINE_PROMPT_NON_EN: any string at an LLM call site or in a
+        #     module-level *PROMPT/*INSTRUCTION/*SYSTEM constant must be
+        #     English-bodied (CJK ratio <30%). Embedded short examples in
+        #     CJK are allowed under the threshold.
+        #   - I18N_NOT_IN_CONFIG: multi-language dicts (≥2 lang keys, must
+        #     include 'en') belong in config/prompts_*.py, not regular code.
+        # Per-line `# noqa: <CODE>` suppression supported. See PR #974 for
+        # the reference incident that motivated this lint.
+        run: python scripts/check_prompt_hygiene.py
+
+      - name: Enforce LLM budget/timeout discipline (output budget + timeout + input budget)
+        # Project policy: every LLM call must be bounded.
+        #   - LLM_OUTPUT_BUDGET: every create_chat_llm() / ChatOpenAI()
+        #     construction must set a token budget (max_completion_tokens= /
+        #     max_tokens=) AND a timeout=. Without a budget the reply can run
+        #     away (cost + latency + context blow-up); without a timeout a hung
+        #     upstream wedges the async pipeline — neither has a safe default in
+        #     utils/llm_client.py. Sites that set budget/timeout per-call (via
+        #     invoke/ainvoke/..(**overrides)) opt out with a justified
+        #     `# noqa: LLM_OUTPUT_BUDGET`.
+        #   - LLM_INPUT_BUDGET (heuristic): every dynamic LLM call must be
+        #     input-budget-aware (truncate_to_tokens / *_MAX_TOKENS in the
+        #     enclosing function). Intentionally-uncapped sites (user-config /
+        #     OS window title etc., cf. docs/design/llm-prompt-budget.md §6)
+        #     opt out with `# noqa: LLM_INPUT_BUDGET`.
+        # See docs/design/llm-prompt-budget.md for the full contract.
+        run: python scripts/check_llm_budget.py
+
+      - name: Verify i18n locale files move in lockstep (PR-only)
+        # Diff-based: when ANY static/locales/*.json or
+        # frontend/plugin-manager/src/i18n/locales/*.ts changes, ALL files
+        # in the group must change AND every hunk must occupy the same line
+        # ranges across all languages. Skipped on direct push to main —
+        # there's nothing to diff against.
+        if: github.event_name == 'pull_request'
+        env:
+          # Indirection instead of inlining ${{ github.base_ref }} into the
+          # shell line: with the `pull_request: branches: [main]` trigger the
+          # ref is always `main`, but zizmor flags the inline form as
+          # template-injection, and env-var expansion is inert either way.
+          BASE_REF: ${{ github.base_ref }}
+        run: python scripts/check_i18n_sync.py --base "origin/${BASE_REF}"
+
+      - name: Forbid CJK in new/modified Python docstrings (PR-only)
+        # Convention: docstrings in the main program are written in English.
+        # The repo carries a large legacy stock of CJK docstrings, so this is
+        # a diff-ratchet: only docstrings whose line span overlaps lines
+        # added/modified in this PR (vs the merge-base) are checked — touch
+        # it, translate it. plugin/ and local_server/ are policy-exempt
+        # (plugin internals follow their own conventions; local_server is a
+        # semi-independent unit). `--full` exists for local migration sweeps.
+        # Suppress a single docstring with `# noqa: DOCSTRING_CJK` (e.g.
+        # fixtures whose CJK content is itself under test). Skipped on direct
+        # push to main — nothing to diff against.
+        if: github.event_name == 'pull_request'
+        env:
+          # Same zizmor template-injection indirection as the i18n-sync step.
+          BASE_REF: ${{ github.base_ref }}
+        run: python scripts/check_docstring_no_cjk.py --base "origin/${BASE_REF}"
+
+      - name: Require zh-TW on new localized prompt dicts (PR-only)
+        # A dict under config/prompts/ with an 'en' key plus 'zh'/'zh-CN' is a
+        # localized prompt table, and `_loc` falls back to 'en' rather than
+        # 'zh' on a missing key — so a table without 'zh-TW' serves Traditional
+        # Chinese users an English prompt. 339 existing tables are still short
+        # one (the batched backfill in issue #2500), so this is a ratchet: it
+        # compares how many such tables exist at the merge-base vs at HEAD and
+        # fails only when the total grew. A plain total is what keeps renames,
+        # copy edits, added locales, and the eventual 'zh'->'zh-CN' migration
+        # from tripping it — see the script docstring for the three narrower
+        # keys that were tried and why each broke. `--full` lists the whole
+        # backlog, `--count` just sizes it. Suppress a single dict with
+        # a `noqa` comment naming PROMPT_ZH_TW on its opening or closing line
+        # (comma-separated lists and a bare `noqa` work too, as in the sibling
+        # gates). Skipped on direct push
+        # to main — nothing to diff against.
+        if: github.event_name == 'pull_request'
+        env:
+          # Same zizmor template-injection indirection as the i18n-sync step.
+          BASE_REF: ${{ github.base_ref }}
+        run: python scripts/check_prompt_zh_tw.py --base "origin/${BASE_REF}"
+
+  api-layering:
+    name: API & layering
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The baseline-growth step below diffs scripts/nonascii_asset_baseline.txt
+          # against the merge-base, which a shallow clone cannot reach. Same
+          # trade the prompts-i18n job already makes: negligible on this repo.
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Forbid trailing-slash route paths on FastAPI decorators (backend)
+        # Project convention: every backend HTTP/WebSocket endpoint is
+        # declared WITHOUT a trailing slash. Avoids Starlette's absolute-URL
+        # 307 redirect under reverse proxies — root cause of the PR #938
+        # chara_manager regression: nginx/etc that don't transparently
+        # forward Host send the redirect Location to 127.0.0.1:<internal>,
+        # which the LAN browser can't reach (ERR_CONNECTION_REFUSED).
+        # The lint exempts the literal '/' root page and explicit alias pairs
+        # (same function carrying both '/foo' and '/foo/'). See
+        # .agent/rules/neko-guide.md (§"API URL 末尾不带斜杠") and
+        # main_routers/characters_router.py docstring.
+        run: python scripts/check_api_trailing_slash.py
+
+      - name: Forbid trailing-slash /api/... URL literals (frontend)
+        # Counterpart to check_api_trailing_slash.py: the backend may declare
+        # /api/foo without trailing slash, but if frontend code calls
+        # fetch('/api/foo/') the same 307 → ERR_CONNECTION_REFUSED happens.
+        # Regex sniffer over static/, frontend/, templates/. Recognises
+        # prefix builders ('/api/foo/' + id, `/api/foo/${id}`) and exempts
+        # them; flags only standalone literals ending in '/'. Suppress with
+        # // noqa: API_TRAILING_SLASH if calling a third-party API that
+        # genuinely requires the slash.
+        run: python scripts/check_frontend_api_trailing_slash.py
+
+      - name: Enforce top-level module layering (no inversions, no cycles)
+        # Top-level packages have a strict ordering — only higher layers may
+        # depend on lower ones (config/steamworks → utils → memory/main_logic
+        # → main_routers → plugin → brain → app). The walker descends into
+        # function bodies and string-form dynamic imports
+        # (importlib.import_module / __import__), so deferred / conditional
+        # imports cannot smuggle in a layer inversion or cycle. Run
+        # `python scripts/check_module_layering.py --show-layers` to print
+        # the hierarchy. Companion unit test: tests/unit/test_module_layering.py.
+        run: python scripts/check_module_layering.py
+
+      - name: Forbid relative-up markdown links inside docs/
+        # docs/ ships through VitePress with itself as the deploy root;
+        # any markdown link target starting with '..' resolves outside the
+        # site and breaks deploy. We've shipped this regression more than
+        # once — this check fails the build before the next attempt lands.
+        # Fix is to inline the path as code (`foo/bar.js`) instead of a
+        # link, or move the referenced content into docs/.
+        run: python scripts/check_docs_no_relative_paths.py
+
+      - name: Forbid new non-ASCII filenames in bundled assets
+        # Nuitka --mode=app puts the payload under Contents/MacOS/, where
+        # codesign treats every file as nested code and writes an
+        # `identifier <name> ...` requirement into CodeResources. A non-ASCII
+        # name becomes a hex literal, which is not valid requirement syntax,
+        # and the whole bundle then fails to verify with "the sealed resource
+        # directory is invalid" — dead in the water for signing, notarization
+        # and Steam upload, with no filename in the error to go on.
+        #
+        # This step exists because build-desktop.yml cannot catch it: it signs
+        # ad-hoc (`--sign -`), whose requirements are `cdhash H"..."` and carry
+        # no identifier, so the bug is invisible there and only bites the local
+        # Developer ID path (build_mac.sh). Ratchet, not a ban — the assets
+        # that predate the check live in scripts/nonascii_asset_baseline.txt
+        # and that list may only shrink. Companion unit test:
+        # tests/unit/test_check_no_nonascii_asset_names.py.
+        run: python scripts/check_no_nonascii_asset_names.py
+
+      - name: Forbid growing the non-ASCII baseline (PR-only)
+        # The step above compares the tree against the baseline, so a PR that
+        # adds a non-ASCII asset AND its baseline line has an empty diff and
+        # passes — the ratchet would only be a convention. This step diffs the
+        # baseline itself against the merge-base and fails on any added entry,
+        # which is what makes "may only shrink" enforceable. `--update-baseline`
+        # already refuses to add; this catches the hand-written line too.
+        # Skipped on direct push to main — nothing to diff against.
+        if: github.event_name == 'pull_request'
+        env:
+          # Same zizmor template-injection indirection as the i18n-sync step.
+          BASE_REF: ${{ github.base_ref }}
+        run: python scripts/check_no_nonascii_asset_names.py --base "origin/${BASE_REF}"
+
+  core-contracts:
+    name: Core package contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Enforce main_logic/core structural contracts
+        # The LLMSessionManager mixin split (#2272) rests on contracts a
+        # comment cannot enforce: symbols that tests rebind on the
+        # main_logic.core facade must be read by manager/mixin code through
+        # the _core_facade late-binding object (a from-import snapshot lets
+        # isolation-style stubs go silently green while the real function
+        # runs), mixins hold methods only, method sets stay disjoint, and
+        # the facade keeps its layout. The patched-symbol set is harvested
+        # from tests/ by AST on every run, so new patch targets tighten the
+        # gate automatically. Not diff-based — cheap full check, runs on
+        # push and PR alike.
+        run: python scripts/check_core_contracts.py

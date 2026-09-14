@@ -1,0 +1,850 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+    <link rel="manifest" href="/static/manifest.json">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <link rel="apple-touch-icon" href="/static/neko_192.png">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="UTF-8">
+    <title data-i18n="viewer.title">Viewer - Project N.E.K.O.</title>
+    <!-- i18next 加载器（统一处理 CDN 加载和初始化） -->
+    <script src="/static/i18n-i18next.js"></script>
+    <style>
+        *:focus {
+            outline: none !important;
+            box-shadow: none !important;
+        }
+
+        html,
+        body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            background: transparent;
+            color: #222;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            pointer-events: none;
+            overflow: hidden;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 0.85;
+                transform: translateY(0);
+            }
+        }
+
+        #live2d-container {
+            position: fixed;
+            right: 0px;
+            bottom: 0px;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+            pointer-events: none;
+            background: none;
+            opacity: 1;
+            overflow: hidden;
+            visibility: visible;
+            transition: all 1s ease-in-out, height 0ms 1s, width 0ms 1s, visibility 0ms 1s;
+        }
+
+        #live2d-container.minimized {
+            right: -800px;
+            opacity: 0;
+            visibility: hidden;
+        }
+
+        #live2d-canvas {
+            right: 0;
+            bottom: 0;
+            pointer-events: none;
+            display: block;
+            opacity: 1;
+            visibility: visible;
+            background: transparent;
+        }
+
+        #live2d-canvas.minimized {
+            opacity: 0;
+            visibility: hidden;
+        }
+
+        #chat-container {
+            pointer-events: auto;
+            position: fixed;
+            left: 20px;
+            bottom: 70px;
+            width: 400px;
+            max-height: 500px;
+            height: 500px;
+            background: #f7f8fa;
+            opacity: 0.9;
+            border-radius: 12px;
+            padding: 0;
+            box-sizing: border-box;
+            overflow: hidden;
+            z-index: 20;
+            box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
+            scroll-behavior: smooth;
+            display: flex;
+            flex-direction: column;
+            transition: width 0.3s ease, height 0.3s ease, max-height 0.3s ease, padding 0.3s ease;
+        }
+
+        #chat-content-wrapper {
+            pointer-events: auto;
+            flex-grow: 1;
+            padding: 16px;
+            padding-top: 48px;
+            overflow-x: hidden;
+            overflow-y: auto;
+            scroll-behavior: smooth;
+            transition: opacity 0.2s ease, visibility 0.2s ease;
+            opacity: 1;
+            visibility: visible;
+            background: #fff;
+        }
+
+        #chat-content-wrapper::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        #chat-content-wrapper::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.95);
+        }
+
+        #chat-content-wrapper::-webkit-scrollbar-thumb {
+            background: rgba(0, 0, 0, 0.15);
+            border-radius: 3px;
+        }
+
+        #chat-content-wrapper::-webkit-scrollbar-thumb:hover {
+            background: rgba(0, 0, 0, 0.25);
+        }
+
+        #chat-content-wrapper::-webkit-scrollbar-corner {
+            background: rgba(255, 255, 255, 0.95);
+        }
+
+        #toggle-chat-btn {
+            pointer-events: auto;
+            position: absolute;
+            top: 12px;
+            right: 12px;
+            width: 32px;
+            height: 32px;
+            background: #e0e1e2;
+            opacity: 0.8;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 14px;
+            /* 统一字体大小 */
+            line-height: 32px;
+            /* 与按钮高度一致 */
+            text-align: center;
+            z-index: 21;
+            padding: 0;
+        }
+
+        #toggle-chat-btn:hover {
+            background: #cacbcd;
+        }
+
+        #toggle-chat-btn img {
+            width: 32px;
+            height: 32px;
+        }
+
+        #chat-header {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 48px;
+            background: #f7f8fa;
+            border-bottom: 1px solid #e0e0e0;
+            display: flex;
+            align-items: center;
+            padding: 0 16px;
+            box-sizing: border-box;
+            z-index: 21;
+        }
+
+        #chat-title {
+            font-size: 1rem;
+            font-weight: 600;
+            color: #333;
+        }
+
+        #chatContainer {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .message {
+            padding: 10px 14px;
+            border-radius: 12px;
+            max-width: 80%;
+            overflow-wrap: break-word;
+            line-height: 1.5;
+            font-size: 0.95rem;
+            animation: fadeIn 0.3s ease;
+        }
+
+        .message.user {
+            align-self: flex-end;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #fff;
+            margin-left: auto;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.gemini {
+            align-self: flex-start;
+            background: #f0f0f0;
+            color: #333;
+            margin-right: auto;
+            border-bottom-left-radius: 4px;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        /* 最小化状态 */
+        #chat-container.minimized {
+            background: transparent;
+            opacity: 1;
+            width: 51px;
+            height: 51px;
+            max-height: 51px;
+            padding: 0;
+            cursor: pointer;
+            border-radius: 50%;
+        }
+
+        #chat-container.minimized #chat-header {
+            display: none;
+        }
+
+        #chat-container.minimized #chat-content-wrapper {
+            opacity: 0;
+            visibility: hidden;
+            height: 0;
+            padding: 0;
+            overflow: hidden;
+        }
+
+        #chat-container.minimized #toggle-chat-btn {
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            width: 100%;
+            height: 100%;
+            transform: none;
+            background: transparent;
+            border-radius: 0;
+        }
+
+        #chat-container.minimized #toggle-chat-btn img {
+            width: 100% !important;
+            height: 100% !important;
+        }
+
+        @media only screen and (max-width: 768px) {
+
+            /* 手机端背景设为黑色 */
+            html,
+            body {
+                background: #000 !important;
+            }
+
+            #live2d-container {
+                position: fixed;
+                right: 0;
+                bottom: 0;
+                width: 100%;
+                height: 100%;
+                z-index: 5;
+            }
+
+            #chat-container {
+                width: 90vw;
+                left: 5vw;
+                bottom: 10px;
+                max-height: 60vh;
+                height: 60vh;
+                padding: 0;
+            }
+
+            #chat-header {
+                height: 40px;
+                font-size: 0.9rem;
+            }
+
+            #chat-content-wrapper {
+                padding: 12px;
+                padding-top: 44px;
+            }
+
+            .message {
+                font-size: 0.9rem;
+                max-width: 85%;
+            }
+        }
+    </style>
+    <link rel="stylesheet" href="/static/css/dark-mode.css">
+    <script src="/static/theme-manager.js"></script>
+</head>
+
+<body>
+    <div id="chat-container">
+        <div id="chat-header">
+            <img src="/static/icons/chat_icon.png" alt="对话" style="width: 25px; height: 25px; object-fit: contain; margin-right: 6px; vertical-align: middle; image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges;">
+            <span id="chat-title" data-i18n="chat.viewerTitle">对话 (观看模式)</span>
+        </div>
+        <button id="toggle-chat-btn" data-i18n-title="common.minimize" title="最小化"><img
+                src='/static/icons/expand_icon_off.png' alt="最小化" data-i18n-alt="common.minimize"
+                width="32" height="32"
+                style="object-fit: cover; pointer-events: none;"></button>
+        <div id="chat-content-wrapper">
+            <div id="chatContainer"></div>
+        </div>
+    </div>
+    <div id="live2d-container">
+        <canvas id="live2d-canvas"></canvas>
+    </div>
+
+    <script>
+        // 页面配置 - 从 URL 或 API 获取
+        let lanlan_config = {
+            lanlan_name: "",
+            master_name: "",
+            master_profile_name: "",
+            master_nickname: "",
+            master_display_name: ""
+        };
+        window.lanlan_config = lanlan_config;
+        let cubism4Model = "";
+
+        // 标记为观看模式，禁用所有交互按钮
+        window.isViewerMode = true;
+
+        // 异步获取页面配置
+        async function loadPageConfig() {
+            try {
+                // 优先从 URL 获取 lanlan_name
+                const urlParams = new URLSearchParams(window.location.search);
+                let lanlanNameFromUrl = urlParams.get('lanlan_name') || "";
+
+                // 从路径中提取 lanlan_name (例如 /{lanlan_name})
+                if (!lanlanNameFromUrl) {
+                    const pathParts = window.location.pathname.split('/').filter(Boolean);
+                    if (pathParts.length > 0 && !['api', 'static', 'subtitle', 'sync', 'sync_binary', 'subtitle_ws', 'ws'].includes(pathParts[0])) {
+                        lanlanNameFromUrl = decodeURIComponent(pathParts[0]);
+                    }
+                }
+
+                // 从 API 获取配置
+                const apiUrl = lanlanNameFromUrl
+                    ? `/api/config/page_config?lanlan_name=${encodeURIComponent(lanlanNameFromUrl)}`
+                    : '/api/config/page_config';
+
+                const response = await fetch(apiUrl);
+                const data = await response.json();
+
+                if (data.success) {
+                    // 使用 URL 中的 lanlan_name（如果有），否则使用 API 返回的
+                    lanlan_config.lanlan_name = lanlanNameFromUrl || data.lanlan_name || "";
+                    lanlan_config.master_name = data.master_name || "";
+                    lanlan_config.master_profile_name = data.master_profile_name || "";
+                    lanlan_config.master_nickname = data.master_nickname || "";
+                    lanlan_config.master_display_name = data.master_display_name || data.master_nickname || data.master_name || "";
+                    window.lanlan_config = lanlan_config;
+                    window.master_name = lanlan_config.master_name;
+                    window.master_profile_name = lanlan_config.master_profile_name;
+                    window.master_nickname = lanlan_config.master_nickname;
+                    window.master_display_name = lanlan_config.master_display_name;
+                    cubism4Model = data.model_path || "";
+                    window.cubism4Model = cubism4Model;  // 设置全局变量供 live2d-init.js 使用
+
+                    // 动态设置页面标题
+                    document.title = `${lanlan_config.lanlan_name} - Viewer`;
+
+                    console.log('页面配置加载成功:', { lanlan_name: lanlan_config.lanlan_name, model_path: cubism4Model });
+                    return true;
+                } else {
+                    console.error('获取页面配置失败:', data.error);
+                    // 使用默认值
+                    lanlan_config.lanlan_name = "";
+                    lanlan_config.master_name = "";
+                    lanlan_config.master_profile_name = "";
+                    lanlan_config.master_nickname = "";
+                    lanlan_config.master_display_name = "";
+                    cubism4Model = "";
+                    window.master_name = "";
+                    window.master_profile_name = "";
+                    window.master_nickname = "";
+                    window.master_display_name = "";
+                    window.cubism4Model = "";
+                    return false;
+                }
+            } catch (error) {
+                console.error('加载页面配置时出错:', error);
+                // 使用默认值
+                lanlan_config.lanlan_name = "";
+                lanlan_config.master_name = "";
+                lanlan_config.master_profile_name = "";
+                lanlan_config.master_nickname = "";
+                lanlan_config.master_display_name = "";
+                cubism4Model = "";
+                window.master_name = "";
+                window.master_profile_name = "";
+                window.master_nickname = "";
+                window.master_display_name = "";
+                window.cubism4Model = "";
+                return false;
+            }
+        }
+
+        // 标记配置是否已加载
+        window.pageConfigReady = loadPageConfig();
+
+        // Electron白屏修复
+        (function () {
+            const fixWhiteScreen = () => {
+                if (document.body) {
+                    void document.body.offsetHeight;
+                    const currentOpacity = document.body.style.opacity || '1';
+                    document.body.style.opacity = '0.99';
+                    requestAnimationFrame(() => {
+                        document.body.style.opacity = currentOpacity;
+                    });
+                }
+            };
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', fixWhiteScreen);
+            } else {
+                fixWhiteScreen();
+            }
+            window.addEventListener('load', fixWhiteScreen);
+        })();
+    </script>
+    <script src="/static/libs/live2dcubismcore.min.js"></script>
+    <script src="/static/libs/live2d.min.js"></script>
+    <script src="/static/libs/pixi.min.js"></script>
+    <script src="/static/libs/index.min.js"></script>
+    <script>
+        // 等待配置加载完成后再加载 Live2D
+        (async function () {
+            try {
+                // 等待配置加载完成
+                await window.pageConfigReady;
+
+                // 动态加载 live2d 模块（按顺序加载拆分后的文件）
+                const live2dModules = [
+                    '/static/common_dialogs.js',
+                    '/static/live2d/live2d-core.js',
+                    '/static/live2d/live2d-emotion.js',
+                    '/static/live2d/live2d-model.js',
+                    '/static/live2d/live2d-interaction.js',
+                    '/static/avatar/avatar-popup-common.js',
+                    '/static/avatar/avatar-ui-popup.js',
+                    '/static/avatar/avatar-ui-popup-config.js',
+                    '/static/avatar/avatar-ui-buttons/core.js',
+                    '/static/avatar/avatar-ui-buttons/idle-assets-and-question.js',
+                    '/static/avatar/avatar-ui-buttons/idle-playground.js',
+                    '/static/avatar/avatar-ui-buttons/idle-actions-and-audio.js',
+                    '/static/avatar/avatar-ui-buttons/idle-drag-and-subactions.js',
+                    '/static/avatar/avatar-ui-buttons/idle-journey-and-presentation.js',
+                    '/static/avatar/avatar-ui-buttons/idle-cat-mind-observations.js',
+                    '/static/avatar/avatar-ui-buttons/methods-setup.js',
+                    '/static/avatar/avatar-ui-buttons/methods-buttons.js',
+                    '/static/avatar/avatar-ui-buttons/methods-return.js',
+                    '/static/avatar/avatar-ui-buttons/methods-state-and-cleanup.js',
+                    '/static/live2d/live2d-ui-buttons.js',
+                    '/static/avatar/avatar-ui-drag.js',
+                    '/static/live2d/live2d-init.js'
+                ];
+
+                // 按顺序加载脚本的辅助函数
+                async function loadScriptsSequentially(scripts) {
+                    for (const src of scripts) {
+                        await new Promise((resolve, reject) => {
+                            const script = document.createElement('script');
+                            script.src = src;
+                            script.onload = resolve;
+                            script.onerror = reject;
+                            document.body.appendChild(script);
+                        });
+                    }
+                }
+
+                // 加载所有 live2d 模块
+                await loadScriptsSequentially(live2dModules);
+            } catch (error) {
+                console.error('加载 live2d 模块时出错:', error);
+            }
+        })();
+    </script>
+
+    <script>
+        // ===== Chat Container Toggle =====
+        const chatContainer = document.getElementById('chat-container');
+        const toggleChatBtn = document.getElementById('toggle-chat-btn');
+        const chatContentWrapper = document.getElementById('chat-content-wrapper');
+
+        let chatMinimized = false;
+
+        toggleChatBtn.addEventListener('click', () => {
+            chatMinimized = !chatMinimized;
+            if (chatMinimized) {
+                chatContainer.classList.add('minimized');
+                // 更新图标为展开图标
+                let iconImg = toggleChatBtn.querySelector('img');
+                if (iconImg) {
+                    iconImg.src = '/static/assets/neko-idle/chat-minimized-yarn-ball-116.png';
+                    iconImg.srcset = '/static/assets/neko-idle/chat-minimized-yarn-ball-116.png 1x, /static/assets/neko-idle/chat-minimized-yarn-ball-232.png 2x';
+                    iconImg.style.imageRendering = 'auto';
+                    iconImg.alt = window.t ? window.t('common.expand') : '展开';
+                    iconImg.style.width = '100%';
+                    iconImg.style.height = '100%';
+                }
+                toggleChatBtn.title = window.t ? window.t('common.expand') : '展开';
+            } else {
+                chatContainer.classList.remove('minimized');
+                // 更新图标为最小化图标
+                let iconImg = toggleChatBtn.querySelector('img');
+                if (iconImg) {
+                    iconImg.src = '/static/icons/expand_icon_off.png';
+                    iconImg.removeAttribute('srcset');
+                    iconImg.style.imageRendering = '';
+                    iconImg.alt = window.t ? window.t('common.minimize') : '最小化';
+                    iconImg.style.width = '32px';
+                    iconImg.style.height = '32px';
+                }
+                toggleChatBtn.title = window.t ? window.t('common.minimize') : '最小化';
+                scrollToBottom();
+            }
+        });
+
+        // 鼠标悬停效果 - 仅在最小化状态下生效
+        toggleChatBtn.addEventListener('mouseenter', () => {
+            if (chatMinimized) {
+                let iconImg = toggleChatBtn.querySelector('img');
+                if (iconImg) {
+                    iconImg.src = '/static/assets/neko-idle/chat-minimized-yarn-ball-116.png';
+                    iconImg.srcset = '/static/assets/neko-idle/chat-minimized-yarn-ball-116.png 1x, /static/assets/neko-idle/chat-minimized-yarn-ball-232.png 2x';
+                    iconImg.style.imageRendering = 'auto';
+                }
+            }
+        });
+
+        toggleChatBtn.addEventListener('mouseleave', () => {
+            if (chatMinimized) {
+                let iconImg = toggleChatBtn.querySelector('img');
+                if (iconImg) {
+                    iconImg.src = '/static/assets/neko-idle/chat-minimized-yarn-ball-116.png';
+                    iconImg.srcset = '/static/assets/neko-idle/chat-minimized-yarn-ball-116.png 1x, /static/assets/neko-idle/chat-minimized-yarn-ball-232.png 2x';
+                    iconImg.style.imageRendering = 'auto';
+                }
+            }
+        });
+
+        // ===== WebSocket Connection to Monitor Server =====
+        let ws = null;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 10;
+        const reconnectDelay = 2000;
+
+        // Audio context for playing audio
+        let audioContext = null;
+        let audioQueue = [];
+        let isPlaying = false;
+        let lipSyncActive = false;
+        let animationFrameId = null;
+        let globalAnalyser = null;
+
+        function initAudioContext() {
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            // 创建全局 analyser 用于口型同步
+            if (!globalAnalyser && audioContext) {
+                globalAnalyser = audioContext.createAnalyser();
+                globalAnalyser.fftSize = 2048;
+                globalAnalyser.connect(audioContext.destination);
+            }
+        }
+
+        // 将 PCM16 数据转换为 WAV 格式
+        // 音频格式: 16-bit PCM, 48kHz, Mono (经过重采样后的音频)
+        function pcm16ToWav(pcm16Data, sampleRate = 48000, numChannels = 1) {
+            const dataLength = pcm16Data.byteLength;
+            const buffer = new ArrayBuffer(44 + dataLength);
+            const view = new DataView(buffer);
+
+            // WAV 文件头
+            const writeString = (offset, string) => {
+                for (let i = 0; i < string.length; i++) {
+                    view.setUint8(offset + i, string.charCodeAt(i));
+                }
+            };
+
+            writeString(0, 'RIFF');
+            view.setUint32(4, 36 + dataLength, true);
+            writeString(8, 'WAVE');
+            writeString(12, 'fmt ');
+            view.setUint32(16, 16, true); // fmt chunk size
+            view.setUint16(20, 1, true); // PCM format
+            view.setUint16(22, numChannels, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * numChannels * 2, true); // byte rate
+            view.setUint16(32, numChannels * 2, true); // block align
+            view.setUint16(34, 16, true); // bits per sample
+            writeString(36, 'data');
+            view.setUint32(40, dataLength, true);
+
+            // 复制 PCM 数据
+            const pcmView = new Int16Array(pcm16Data);
+            const wavView = new Int16Array(buffer, 44);
+            wavView.set(pcmView);
+
+            return buffer;
+        }
+
+        async function playAudioChunk(audioData) {
+            initAudioContext();
+
+            try {
+                // 将原始 PCM16 数据转换为 WAV 格式
+                const wavData = pcm16ToWav(audioData);
+                const audioBuffer = await audioContext.decodeAudioData(wavData);
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+
+                // 连接到全局 analyser（所有音频源共享同一个 analyser）
+                source.connect(globalAnalyser);
+
+                // 启动口型同步（只在第一次启动）
+                if (!lipSyncActive && window.LanLan1 && window.LanLan1.live2dModel) {
+                    startLipSync(window.LanLan1.live2dModel, globalAnalyser);
+                    lipSyncActive = true;
+                }
+
+                return new Promise((resolve) => {
+                    source.onended = () => {
+                        // 检查是否还有音频在播放
+                        if (audioQueue.length === 0) {
+                            stopLipSync();
+                            lipSyncActive = false;
+                        }
+                        resolve();
+                    };
+                    source.start(0);
+                });
+            } catch (error) {
+                console.error('音频播放错误:', error);
+            }
+        }
+
+        function startLipSync(model, analyser) {
+            const dataArray = new Uint8Array(analyser.fftSize);
+
+            function animate() {
+                analyser.getByteTimeDomainData(dataArray);
+                // 简单求音量（RMS）
+                let sum = 0;
+                for (let i = 0; i < dataArray.length; i++) {
+                    const val = (dataArray[i] - 128) / 128; // 归一化到 -1~1
+                    sum += val * val;
+                }
+                const rms = Math.sqrt(sum / dataArray.length);
+                // 映射到嘴巴开合度 0~1
+                const mouthOpen = Math.min(1, rms * 8);
+
+                if (window.LanLan1 && window.LanLan1.live2dModel) {
+                    window.LanLan1.setMouth(mouthOpen);
+                }
+
+                animationFrameId = requestAnimationFrame(animate);
+            }
+
+            animate();
+        }
+
+        function stopLipSync() {
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
+                animationFrameId = null;
+            }
+            if (window.LanLan1 && window.LanLan1.live2dModel) {
+                window.LanLan1.setMouth(0);
+            }
+        }
+
+        async function processAudioQueue() {
+            if (isPlaying || audioQueue.length === 0) return;
+
+            isPlaying = true;
+            while (audioQueue.length > 0) {
+                const chunk = audioQueue.shift();
+                await playAudioChunk(chunk);
+            }
+            isPlaying = false;
+        }
+
+        function clearAudioQueue() {
+            audioQueue = [];
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+                globalAnalyser = null; // 重置全局 analyser
+            }
+            isPlaying = false;
+            stopLipSync();
+            lipSyncActive = false;
+        }
+
+        function connectWebSocket() {
+            if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
+                return;
+            }
+
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws/${lanlan_config.lanlan_name}`;
+
+            console.log('连接到 Monitor Server:', wsUrl);
+
+            ws = new WebSocket(wsUrl);
+            ws.binaryType = 'arraybuffer'; // 支持接收二进制数据
+
+            ws.onopen = () => {
+                console.log('WebSocket 已连接');
+                reconnectAttempts = 0;
+            };
+
+            ws.onmessage = async (event) => {
+                // 处理二进制音频数据
+                if (event.data instanceof ArrayBuffer) {
+                    if (event.data.byteLength > 4) { // 过滤心跳包
+                        audioQueue.push(event.data);
+                        processAudioQueue();
+                    }
+                    return;
+                }
+
+                // 处理 JSON 消息
+                try {
+                    const response = JSON.parse(event.data);
+
+                    if (response.type === 'gemini_response') {
+                        const isNewMessage = response.isNewMessage || false;
+                        appendMessage(response.text, 'gemini', isNewMessage);
+                    } else if (response.type === 'user_transcript') {
+                        appendMessage(response.text, 'user', true);
+                    } else if (response.type === 'user_activity') {
+                        clearAudioQueue();
+                    } else if (response.type === 'emotion') {
+                        // 应用情感到 Live2D 模型
+                        if (window.LanLan1 && window.LanLan1.setEmotion) {
+                            window.LanLan1.setEmotion(response.emotion);
+                        }
+                    } else if (response.type === 'expression') {
+                        // 应用表情到 Live2D 模型
+                        if (window.LanLan1 && window.LanLan1.registered_expressions) {
+                            const fn = window.LanLan1.registered_expressions[response.message];
+                            if (typeof fn === 'function') {
+                                fn();
+                            } else {
+                                console.warn('未知表情指令:', response.message);
+                            }
+                        }
+                    } else if (response.type === 'turn end') {
+                        // Turn ended, could add separator if needed
+                    } else if (response.type === 'heartbeat') {
+                        // Heartbeat, do nothing
+                    }
+                } catch (error) {
+                    console.error('消息处理错误:', error);
+                }
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket 错误:', error);
+            };
+
+            ws.onclose = () => {
+                console.log('WebSocket 已断开');
+                ws = null;
+
+                if (reconnectAttempts < maxReconnectAttempts) {
+                    reconnectAttempts++;
+                    console.log(`尝试重新连接 (${reconnectAttempts}/${maxReconnectAttempts})...`);
+                    setTimeout(connectWebSocket, reconnectDelay);
+                } else {
+                    console.error('达到最大重连次数，停止重连');
+                }
+            };
+        }
+
+        // ===== Chat Message Display =====
+        let currentMessageElement = null;
+
+        function appendMessage(text, sender, isNewMessage) {
+            const chatContainer = document.getElementById('chatContainer');
+
+            if (isNewMessage || !currentMessageElement || currentMessageElement.classList.contains(sender === 'user' ? 'gemini' : 'user')) {
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `message ${sender}`;
+                messageDiv.textContent = text;
+                chatContainer.appendChild(messageDiv);
+                currentMessageElement = messageDiv;
+            } else {
+                currentMessageElement.textContent += text;
+            }
+
+            scrollToBottom();
+        }
+
+        function scrollToBottom() {
+            if (!chatMinimized) {
+                chatContentWrapper.scrollTop = chatContentWrapper.scrollHeight;
+            }
+        }
+
+        // ===== Initialize =====
+        // 等待配置加载完成后再连接 WebSocket
+        (async function () {
+            try {
+                await window.pageConfigReady;
+                connectWebSocket();
+            } catch (error) {
+                console.error('初始化 WebSocket 时出错:', error);
+            }
+        })();
+    </script>
+</body>
+
+</html>

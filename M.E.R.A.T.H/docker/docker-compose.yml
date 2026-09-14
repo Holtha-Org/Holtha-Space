@@ -1,0 +1,77 @@
+version: '3.8'
+
+# ============================================================================
+# N.E.K.O. Docker Compose 配置
+# ============================================================================
+#
+# 支持两种镜像版本：
+#   1. 标准版 (standard) - 轻量 (~1.5GB)，首次启动时下载 Chromium
+#   2. 完整版 (full)     - 完整 (~2.5GB)，构建时已包含 Chromium，开箱即用
+#
+# 使用方法：
+#   # 使用标准版（默认）
+#   docker-compose up -d
+#
+#   # 使用完整版
+#   NEKO_IMAGE_VERSION=latest-full docker-compose up -d
+#
+#   # 本地构建标准版
+#   docker-compose build && docker-compose up -d
+#
+#   # 本地构建完整版
+#   NEKO_IMAGE_VERSION=latest-full docker-compose -f docker-compose.yml build && \
+#   NEKO_IMAGE_VERSION=latest-full docker-compose up -d
+# ============================================================================
+
+services:
+  neko-main:
+    # 容器镜像配置 - 支持通过环境变量切换版本
+    # 标准版：latest (或 latest-standard) / 完整版：latest-full
+    image: ${NEKO_IMAGE:-docker.gh-proxy.org/ghcr.io/project-n-e-k-o/n.e.k.o:${NEKO_IMAGE_VERSION:-latest}}
+
+    # 备用镜像源（取消注释以使用）
+    # image: ${NEKO_IMAGE:-ghcr.io/project-n-e-k-o/n.e.k.o:${NEKO_IMAGE_VERSION:-latest}}
+    # image: ${NEKO_IMAGE:-projectneko/n.e.k.o:${NEKO_IMAGE_VERSION:-latest}}
+
+    # 容器配置
+    container_name: neko
+    restart: unless-stopped
+
+    # 端口映射配置
+    ports:
+      # HTTP端口映射：外部端口48911 -> 容器内部Nginx端口80
+      # 访问方式: http://服务器IP:48911
+      - "48911:80"
+
+      # HTTPS端口映射：外部端口48912 -> 容器内部Nginx端口443
+      # 访问方式: https://服务器IP:48912
+      - "48912:443"
+
+    # 卷挂载配置
+    # ⚠️ 旧版本用 ./N.E.K.O + ./ssl 两个挂载，现已合并为 ./neko-home 一个。
+    #    从旧版升级必须先迁移数据（见 README「从旧版本升级」一节），
+    #    否则容器会对着一个空目录启动，表现为"数据全没了"。
+    volumes:
+      # 1. neko 用户主目录（用户数据、SSL 证书与私钥）
+      - ./neko-home:/home/neko
+
+      # 2. 源码模式的调试日志回退目录
+      - ./logs:/app/logs
+    # 环境变量
+    environment:
+      # 统一容器内的本地时间；可在 docker/.env 中改为其他 IANA 时区
+      - TZ=${TZ:-Asia/Shanghai}
+
+      # 强制所有运行时数据留在上述持久化挂载内，避免存储位置配置指向容器临时层
+      - XDG_DATA_HOME=/home/neko/.local/share
+      - NEKO_STORAGE_SELECTED_ROOT=/home/neko/.local/share/N.E.K.O
+      - NEKO_STORAGE_ANCHOR_ROOT=/home/neko/.local/share/N.E.K.O
+
+    # 网络配置
+    networks:
+      - neko-network
+
+# 网络定义
+networks:
+  neko-network:
+    driver: bridge

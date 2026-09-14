@@ -1,0 +1,868 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>N.E.K.O. Toast</title>
+    <link rel="stylesheet" href="/static/css/index.css">
+    <link rel="stylesheet" href="/static/css/dark-mode.css">
+    <!-- i18next 加载器（复用 index.html 的 i18n 基础设施） -->
+    <script src="/static/i18n-i18next.js"></script>
+    <style>
+        html, body {
+            margin: 0; padding: 0;
+            width: 100%; height: 100%;
+            background: transparent !important;
+            overflow: hidden;
+            pointer-events: none;
+        }
+        /* prominent notice overlay 需要可交互 */
+        #prominent-notice-overlay {
+            pointer-events: auto;
+        }
+    </style>
+</head>
+<body>
+    <!-- Status toast（复用 index.css 中的 #status-toast 样式） -->
+    <div id="status-toast"></div>
+
+    <script>
+    (function() {
+        'use strict';
+
+        // ===== i18n 就绪等待机制 =====
+        // i18n-i18next.js 异步初始化，IPC 消息可能在 window.t 就绪前到达。
+        // localechange 在 exportNormalFunctions/exportFallbackFunctions 中 dispatch，
+        // 但由于 localechange 在 window.t 赋值之前同步触发，需要 setTimeout(0)
+        // 推迟到当前调用栈结束后再 flush，确保 window.t 已被设置。
+        var _i18nReady = (typeof window.t === 'function');
+        var _i18nQueue = [];
+
+        function _flushI18nQueue() {
+            if (_i18nReady) return;
+            _i18nReady = true;
+            var q = _i18nQueue;
+            _i18nQueue = [];
+            for (var i = 0; i < q.length; i++) q[i]();
+        }
+
+        if (!_i18nReady) {
+            window.addEventListener('localechange', function onLocale() {
+                window.removeEventListener('localechange', onLocale);
+                setTimeout(_flushI18nQueue, 0);
+            });
+        }
+
+        function whenI18nReady(fn) {
+            if (_i18nReady) fn();
+            else _i18nQueue.push(fn);
+        }
+
+        // ===== Toast API（由 preload-toast.js 注入）=====
+        var api = window.nekoToastAPI;
+
+        // ===== Status Toast =====
+        var statusToast = document.getElementById('status-toast');
+        var statusTimeout = null;
+        var cleanupTimer = null;
+        var prominentNoticeInteractive = false;
+        var toastMouseThroughState = null;
+        var statusPointerPollTimer = null;
+        var statusPointerPollGeneration = 0;
+        var STATUS_POINTER_POLL_MS = 50;
+        var compactStatusInputRegionFrame = null;
+        var compactStatusInputRegionGeneration = 0;
+        var statusCopyRevision = 0;
+        // 命中检测开着时，轮询结果是「光标在不在提示上」的唯一权威。
+        // 窗口在穿透态收不到任何鼠标事件，所以「光标跨进矩形」这一刻必然发生在
+        // 渲染进程失聪期间：若用户在窗口恢复命中前就停稳，mouseenter 永远不会补发，
+        // DOM :hover 也不可信。hover 暂停自动消失因此不能再依赖 DOM 事件。
+        var statusPointerTrackingActive = false;
+        var statusPointerInside = false;
+
+        function setToastMouseThrough(ignore, force) {
+            if (!api || typeof api.setMouseThrough !== 'function') return;
+            ignore = !!ignore;
+            if (!force && toastMouseThroughState === ignore) return;
+            toastMouseThroughState = ignore;
+            api.setMouseThrough(ignore);
+        }
+
+        function isStatusToastVisible() {
+            return !!statusToast
+                && statusToast.classList.contains('show')
+                && !statusToast.classList.contains('hide')
+                && !document.hidden;
+        }
+
+        function isCursorInsideStatusToast(point) {
+            if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return false;
+            var rect = statusToast.getBoundingClientRect();
+            if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+            return point.x >= rect.left && point.x < rect.right
+                && point.y >= rect.top && point.y < rect.bottom;
+        }
+
+        // 单次光标 IPC 的兜底期限。轮询周期 50ms，正常往返远小于此；超过即认为 IPC
+        // 悬挂，强制回到穿透态而不是把窗口无限期留在可命中态。
+        var STATUS_POINTER_IPC_TIMEOUT_MS = 1000;
+        var statusPointerWatchdogTimer = null;
+
+        function clearStatusPointerWatchdog() {
+            if (!statusPointerWatchdogTimer) return;
+            clearTimeout(statusPointerWatchdogTimer);
+            statusPointerWatchdogTimer = null;
+        }
+
+        function armStatusPointerWatchdog(generation) {
+            clearStatusPointerWatchdog();
+            statusPointerWatchdogTimer = setTimeout(function() {
+                statusPointerWatchdogTimer = null;
+                if (generation !== statusPointerPollGeneration) return;
+                stopStatusPointerTracking(false);
+            }, STATUS_POINTER_IPC_TIMEOUT_MS);
+        }
+
+        function stopStatusPointerTracking(keepCurrentMouseState) {
+            statusPointerPollGeneration += 1;
+            if (statusPointerPollTimer) {
+                clearTimeout(statusPointerPollTimer);
+                statusPointerPollTimer = null;
+            }
+            clearStatusPointerWatchdog();
+            var wasPinnedByPointer = statusPointerInside;
+            statusPointerTrackingActive = false;
+            statusPointerInside = false;
+            // 轮询驱动的 pin 只能由轮询自己解开：一旦停止追踪，窗口回到穿透态，
+            // 再也不会有 mouseleave 到达。此处不恢复计时，被 pin 住的提示就会一直
+            // 挂在屏幕上（光标 IPC 失败/悬挂、prominent notice 打断、页面转入后台都会
+            // 走到这里）。
+            //
+            // 这里**不能**走 _leave：它会回落到 DOM :hover 判定，而如果之前真的来过
+            // 一次 mouseenter，:hover 此刻为真且再也不会被 mouseleave 纠正（窗口已穿透），
+            // 于是拒绝排程，提示照样滞留。只认键盘焦点。
+            if (wasPinnedByPointer
+                && statusToast._resumeAutoHide
+                && !statusToast.matches(':focus-within')) {
+                statusToast._resumeAutoHide();
+            }
+            if (!keepCurrentMouseState
+                && !prominentNoticeInteractive
+                && !(api
+                    && api.supportsStatusPointerTracking === false
+                    && typeof api.setStatusInputRegion === 'function')) {
+                setToastMouseThrough(true);
+            }
+        }
+
+        // 是否仍应按住自动消失。命中检测开着时不能信 DOM :hover —— 窗口在穿透态收不到
+        // 鼠标事件，:hover 可能从未置起（光标停稳型）或已经陈旧；此时以轮询结果为准。
+        // 键盘焦点两种模式下都要保留。
+        function statusHoverHoldActive() {
+            if (statusPointerTrackingActive) {
+                return statusPointerInside || statusToast.matches(':focus-within');
+            }
+            return statusToast.matches(':hover, :focus-within');
+        }
+
+        // 由轮询驱动 hover 暂停/恢复。DOM 的 mouseenter/mouseleave 仍然挂着，两条路
+        // 都调同一对幂等处理器（_enter 见 statusTimeout 已空即返回，_leave 见已排程即
+        // 返回），先到者生效，不会重复记账。
+        // 下面的边沿判定因此只是省掉每拍的无用调用，不承担正确性；真正必须的是
+        // stopStatusPointerTracking 里把 statusPointerInside 清零，否则光标停着不动时
+        // 第二条提示会被当成「状态未变」而漏掉 pin。
+        function applyStatusPointerHover(inside) {
+            if (inside === statusPointerInside) return;
+            statusPointerInside = inside;
+            if (inside) {
+                if (statusToast._enter) statusToast._enter();
+            } else if (statusToast._leave) {
+                statusToast._leave();
+            }
+        }
+
+        function pollStatusPointer(generation) {
+            if (generation !== statusPointerPollGeneration) return;
+            if (prominentNoticeInteractive || !isStatusToastVisible()) {
+                stopStatusPointerTracking(prominentNoticeInteractive);
+                return;
+            }
+
+            var cursorPointPromise;
+            try {
+                cursorPointPromise = api.getCursorPoint();
+            } catch (_) {
+                stopStatusPointerTracking(false);
+                return;
+            }
+
+            // 光标 IPC 只要不 settle，下面两条分支一条都不会走：既不重排下一拍，也不
+            // 触发拒绝清理。而此时窗口可能已因上一拍的 inside 结果处于可命中态、自动
+            // 消失计时也已被清掉 —— 全屏透明窗口会一直吞掉整个桌面的输入。主进程侧的
+            // 空闲销毁救不了场：它在渲染端持有 ignore=false 时会主动推迟销毁。
+            armStatusPointerWatchdog(generation);
+
+            Promise.resolve(cursorPointPromise).then(function(point) {
+                // 世代检查必须在清看门狗**之前**：旧世代的 Promise 可能在新一轮已经
+                // 武装好看门狗之后才 settle，抢先清掉就等于把新请求的兜底摘了 ——
+                // 新请求若随后悬挂，窗口会无限期停在可命中态拦截桌面输入。
+                if (generation !== statusPointerPollGeneration) return;
+                clearStatusPointerWatchdog();
+                if (prominentNoticeInteractive || !isStatusToastVisible()) return;
+                var inside = isCursorInsideStatusToast(point);
+                setToastMouseThrough(!inside);
+                applyStatusPointerHover(inside);
+            }).catch(function() {
+                // 同上：先认世代，再动共享的看门狗。
+                if (generation !== statusPointerPollGeneration) return;
+                clearStatusPointerWatchdog();
+                // 光标 IPC 异常时立即回到穿透态，不能让透明全屏窗口留在桌面上拦截输入。
+                stopStatusPointerTracking(false);
+            }).then(function() {
+                if (generation !== statusPointerPollGeneration
+                    || prominentNoticeInteractive
+                    || !isStatusToastVisible()) return;
+                statusPointerPollTimer = setTimeout(function() {
+                    statusPointerPollTimer = null;
+                    pollStatusPointer(generation);
+                }, STATUS_POINTER_POLL_MS);
+            });
+        }
+
+        function startStatusPointerTracking() {
+            stopStatusPointerTracking(true);
+            if (prominentNoticeInteractive) return;
+
+            // 旧版 Electron preload 和普通网页环境安全降级为全程穿透。Niri 小窗
+            // 不做全局光标轮询，而是由 setStatusInputRegion 精确开放气泡区域。
+            if (!api || api.supportsStatusPointerTracking === false) {
+                if (!api || typeof api.setStatusInputRegion !== 'function') {
+                    setToastMouseThrough(true);
+                }
+                return;
+            }
+            if (typeof api.getCursorPoint !== 'function') {
+                setToastMouseThrough(true);
+                return;
+            }
+
+            setToastMouseThrough(true);
+            statusPointerTrackingActive = true;
+            var generation = statusPointerPollGeneration;
+            pollStatusPointer(generation);
+        }
+
+        function updateCompactStatusInputRegion(visible) {
+            if (!api
+                || api.supportsStatusPointerTracking !== false
+                || typeof api.setStatusInputRegion !== 'function') return;
+            if (!visible) {
+                api.setStatusInputRegion(null);
+                return;
+            }
+            var rect = statusToast.getBoundingClientRect();
+            api.setStatusInputRegion({
+                x: rect.left,
+                y: rect.top,
+                width: rect.width,
+                height: rect.height,
+            });
+        }
+
+        function stopCompactStatusInputRegionTracking() {
+            compactStatusInputRegionGeneration += 1;
+            if (compactStatusInputRegionFrame !== null
+                && typeof window.cancelAnimationFrame === 'function') {
+                window.cancelAnimationFrame(compactStatusInputRegionFrame);
+            }
+            compactStatusInputRegionFrame = null;
+        }
+
+        function trackCompactStatusInputRegionThroughTransition() {
+            stopCompactStatusInputRegionTracking();
+            var generation = compactStatusInputRegionGeneration;
+            var startedAt = Date.now();
+            function sync() {
+                if (generation !== compactStatusInputRegionGeneration
+                    || prominentNoticeInteractive
+                    || !isStatusToastVisible()) return;
+                updateCompactStatusInputRegion(true);
+                if (Date.now() - startedAt >= 450
+                    || typeof window.requestAnimationFrame !== 'function') {
+                    compactStatusInputRegionFrame = null;
+                    return;
+                }
+                compactStatusInputRegionFrame = window.requestAnimationFrame(sync);
+            }
+            sync();
+        }
+
+        var toastRemaining = 3000; var toastStart = 0; var showTimer = null;
+        function hideStatusNow() {
+            statusCopyRevision += 1;
+            stopCompactStatusInputRegionTracking();
+            updateCompactStatusInputRegion(false);
+            stopStatusPointerTracking(false);
+            if (showTimer) { clearTimeout(showTimer); showTimer = null; }
+            if (statusTimeout) { clearTimeout(statusTimeout); statusTimeout = null; }
+            if (cleanupTimer) { clearTimeout(cleanupTimer); cleanupTimer = null; }
+            if (statusToast._enter) { statusToast.removeEventListener('mouseenter', statusToast._enter); statusToast._enter = null; }
+            if (statusToast._leave) { statusToast.removeEventListener('mouseleave', statusToast._leave); statusToast._leave = null; }
+            if (statusToast._focusIn) { statusToast.removeEventListener('focusin', statusToast._focusIn); statusToast._focusIn = null; }
+            if (statusToast._focusOut) { statusToast.removeEventListener('focusout', statusToast._focusOut); statusToast._focusOut = null; }
+            var _cb = statusToast.querySelector('#status-toast-close');
+            if (_cb) { _cb.disabled = true; _cb.tabIndex = -1; _cb.setAttribute('aria-hidden','true'); if (document.activeElement === _cb) _cb.blur(); }
+            var _copyText = statusToast.querySelector('#status-toast-text');
+            if (_copyText) { _copyText.classList.remove('status-toast-copy-success'); _copyText.tabIndex = -1; _copyText.setAttribute('aria-hidden','true'); if (document.activeElement === _copyText) _copyText.blur(); }
+            statusToast.classList.remove('show');
+            statusToast.classList.add('hide');
+            cleanupTimer = setTimeout(function() { var t=statusToast.querySelector('#status-toast-text'); if(t) t.textContent=''; Array.from(statusToast.childNodes).forEach(function(n){ if(n.nodeType===3) n.textContent=''; }); cleanupTimer=null; }, 400);
+        }
+        function scheduleHide(ms) {
+            if (statusTimeout) clearTimeout(statusTimeout);
+            toastRemaining = ms; toastStart = Date.now();
+            statusTimeout = setTimeout(hideStatusNow, ms);
+        }
+        function copyStatusToastTextLegacy(value) {
+            if (!document.body || typeof document.execCommand !== 'function') return false;
+            var activeElement = document.activeElement;
+            var selectionStart = activeElement && typeof activeElement.selectionStart === 'number'
+                ? activeElement.selectionStart
+                : null;
+            var selectionEnd = activeElement && typeof activeElement.selectionEnd === 'number'
+                ? activeElement.selectionEnd
+                : null;
+            var textArea = document.createElement('textarea');
+            textArea.value = value;
+            textArea.setAttribute('readonly', '');
+            textArea.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0;pointer-events:none;';
+            document.body.appendChild(textArea);
+            var copied = false;
+            try {
+                textArea.focus({ preventScroll: true });
+                textArea.select();
+                copied = document.execCommand('copy') === true;
+            } catch (_) {
+                copied = false;
+            }
+            textArea.remove();
+            try {
+                if (activeElement && typeof activeElement.focus === 'function') {
+                    activeElement.focus({ preventScroll: true });
+                    if (selectionStart !== null
+                        && selectionEnd !== null
+                        && typeof activeElement.setSelectionRange === 'function') {
+                        activeElement.setSelectionRange(selectionStart, selectionEnd);
+                    }
+                }
+            } catch (_) { }
+            return copied;
+        }
+        function copyStatusToastText(value) {
+            if (!value) return Promise.resolve(false);
+            function copyWithWebClipboard() {
+                try {
+                    if (typeof navigator !== 'undefined'
+                        && navigator.clipboard
+                        && typeof navigator.clipboard.writeText === 'function') {
+                        return navigator.clipboard.writeText(value)
+                            .then(function() { return true; })
+                            .catch(function() { return copyStatusToastTextLegacy(value); });
+                    }
+                } catch (_) { }
+                return Promise.resolve(copyStatusToastTextLegacy(value));
+            }
+            try {
+                if (api && typeof api.copyText === 'function') {
+                    return Promise.resolve(api.copyText(value)).then(function(result) {
+                        return result !== false ? true : copyWithWebClipboard();
+                    }).catch(copyWithWebClipboard);
+                }
+            } catch (_) {
+                return copyWithWebClipboard();
+            }
+            return copyWithWebClipboard();
+        }
+        function showStatusToastCopyFeedback(textEl, copyRevision) {
+            if (textEl._copyFeedbackTimer) clearTimeout(textEl._copyFeedbackTimer);
+            textEl.classList.remove('status-toast-copy-success');
+            void textEl.offsetWidth;
+            textEl.classList.add('status-toast-copy-success');
+            var feedbackTimer = setTimeout(function() {
+                if (textEl._copyFeedbackTimer !== feedbackTimer) return;
+                if (statusCopyRevision === copyRevision) {
+                    textEl.classList.remove('status-toast-copy-success');
+                }
+                textEl._copyFeedbackTimer = null;
+            }, 450);
+            textEl._copyFeedbackTimer = feedbackTimer;
+        }
+        function showStatusToast(message, duration) {
+            if (duration == null) duration = 3000;
+            if (!message || !message.trim()) {
+                statusCopyRevision += 1;
+                stopCompactStatusInputRegionTracking();
+                updateCompactStatusInputRegion(false);
+                stopStatusPointerTracking(false);
+                if (showTimer) { clearTimeout(showTimer); showTimer=null; }
+                if (statusTimeout) { clearTimeout(statusTimeout); statusTimeout = null; }
+                if (cleanupTimer) { clearTimeout(cleanupTimer); cleanupTimer = null; }
+                if (statusToast._enter) { statusToast.removeEventListener('mouseenter', statusToast._enter); statusToast._enter = null; }
+                if (statusToast._leave) { statusToast.removeEventListener('mouseleave', statusToast._leave); statusToast._leave = null; }
+                if (statusToast._focusIn) { statusToast.removeEventListener('focusin', statusToast._focusIn); statusToast._focusIn = null; }
+                if (statusToast._focusOut) { statusToast.removeEventListener('focusout', statusToast._focusOut); statusToast._focusOut = null; }
+                var _cb2=statusToast.querySelector('#status-toast-close'); if(_cb2){ _cb2.disabled=true; _cb2.tabIndex=-1; _cb2.setAttribute('aria-hidden','true'); if(document.activeElement===_cb2) _cb2.blur(); }
+                var _copyText2=statusToast.querySelector('#status-toast-text'); if(_copyText2){ _copyText2.classList.remove('status-toast-copy-success'); _copyText2.tabIndex=-1; _copyText2.setAttribute('aria-hidden','true'); if(document.activeElement===_copyText2) _copyText2.blur(); }
+                statusToast.classList.remove('show');
+                statusToast.classList.add('hide');
+                cleanupTimer = setTimeout(function() { var t=statusToast.querySelector('#status-toast-text'); if(t) t.textContent=''; Array.from(statusToast.childNodes).forEach(function(n){ if(n.nodeType===3) n.textContent=''; }); cleanupTimer=null; }, 400);
+                toastRemaining=null; toastStart=null;
+                return;
+            }
+            if (showTimer) { clearTimeout(showTimer); showTimer=null; }
+            if (statusTimeout) { clearTimeout(statusTimeout); statusTimeout = null; }
+            if (cleanupTimer) { clearTimeout(cleanupTimer); cleanupTimer = null; }
+            var textEl = statusToast.querySelector('#status-toast-text');
+            if (!textEl) { textEl=document.createElement('span'); textEl.id='status-toast-text'; textEl.style.cssText='position:relative;z-index:1;flex:1;min-width:0;overflow-wrap:anywhere;'; statusToast.appendChild(textEl); }
+            Array.from(statusToast.childNodes).forEach(function(n){ if(n!==textEl && n.nodeType===3) n.textContent=''; });
+            if (cleanupTimer) { clearTimeout(cleanupTimer); cleanupTimer = null; }
+            statusCopyRevision += 1;
+            var copyRevision = statusCopyRevision;
+            textEl.classList.remove('status-toast-copy-success');
+            textEl.textContent = message;
+            textEl.title = (typeof window.t === 'function')
+                ? window.t('chat.copyToClipboard', { defaultValue: 'Copy to clipboard' })
+                : 'Copy to clipboard';
+            textEl.setAttribute('role', 'button');
+            textEl.setAttribute('aria-hidden', 'false');
+            textEl.tabIndex = 0;
+            function copyCurrentMessage(e) {
+                e.stopPropagation();
+                copyStatusToastText(message).then(function(copied) {
+                    if (copied && statusCopyRevision === copyRevision) {
+                        showStatusToastCopyFeedback(textEl, copyRevision);
+                    }
+                });
+            }
+            textEl.onclick = function(e) {
+                copyCurrentMessage(e);
+                if (document.activeElement === textEl) textEl.blur();
+                if (statusToast._focusOut) statusToast._focusOut();
+            };
+            textEl.onkeydown = function(e) {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                e.preventDefault();
+                copyCurrentMessage(e);
+            };
+            var closeBtn = statusToast.querySelector('#status-toast-close');
+            if (!closeBtn) {
+                closeBtn = document.createElement('button');
+                closeBtn.id = 'status-toast-close';
+                closeBtn.type = 'button';
+                closeBtn.setAttribute('aria-label','close');
+                if(!document.querySelector('style[data-toast-close]')){
+                    var cs=document.createElement('style');
+                    cs.setAttribute('data-toast-close','true');
+                    cs.textContent='#status-toast-close::before,#status-toast-close::after{content:"";position:absolute;left:50%;top:50%;width:10px;height:2px;border-radius:999px;background:#fff;pointer-events:none}#status-toast-close::before{transform:translate(-50%,-50%) rotate(45deg)}#status-toast-close::after{transform:translate(-50%,-50%) rotate(-45deg)}#status-toast-close:focus-visible{outline:2px solid rgba(255,255,255,0.9);outline-offset:2px}';
+                    document.head.appendChild(cs);
+                }
+                closeBtn.style.cssText = 'position:absolute;top:6px;right:8px;z-index:2;width:22px;height:22px;border:none;border-radius:50%;background:rgba(255,255,255,0.22);cursor:pointer;padding:0;opacity:0.85;font-size:0;line-height:0;';
+                statusToast.appendChild(closeBtn);
+            }
+            closeBtn.disabled = false; closeBtn.tabIndex = 0; closeBtn.removeAttribute('aria-hidden');
+            closeBtn.onclick = function(e){ e.stopPropagation(); hideStatusNow(); };
+            statusToast.style.display = 'block';
+            statusToast.style.visibility = 'visible';
+            statusToast.style.paddingRight = '36px';
+            statusToast.classList.remove('hide');
+            showTimer = setTimeout(function() {
+                statusToast.classList.add('show');
+                showTimer=null;
+                trackCompactStatusInputRegionThroughTransition();
+                startStatusPointerTracking();
+            }, 10);
+            if (statusToast._enter) statusToast.removeEventListener('mouseenter', statusToast._enter);
+            if (statusToast._leave) statusToast.removeEventListener('mouseleave', statusToast._leave);
+            if (statusToast._focusIn) statusToast.removeEventListener('focusin', statusToast._focusIn);
+            if (statusToast._focusOut) statusToast.removeEventListener('focusout', statusToast._focusOut);
+            statusToast._enter = function() {
+                if (!statusTimeout) return;
+                clearTimeout(statusTimeout); statusTimeout = null;
+                var elapsed = Date.now() - toastStart;
+                var base = toastRemaining!=null ? toastRemaining : duration;
+                toastRemaining = Math.max(0, base - elapsed);
+            };
+            statusToast._leave = function() {
+                if (statusTimeout || statusToast.classList.contains('hide')) return;
+                if (!statusHoverHoldActive()) scheduleHide(toastRemaining!=null ? toastRemaining : duration);
+            };
+            // 追踪中断时的恢复入口：与 _leave 的区别是**不问 DOM :hover**。停止追踪后
+            // 窗口回到穿透态，陈旧的 :hover 再无 mouseleave 可纠正，问了就等于永不恢复。
+            statusToast._resumeAutoHide = function() {
+                if (statusTimeout || statusToast.classList.contains('hide')) return;
+                scheduleHide(toastRemaining!=null ? toastRemaining : duration);
+            };
+            statusToast._focusIn = function() {
+                if (!statusTimeout) return;
+                clearTimeout(statusTimeout); statusTimeout = null;
+                var elapsed = Date.now() - toastStart;
+                var base = toastRemaining!=null ? toastRemaining : duration;
+                toastRemaining = Math.max(0, base - elapsed);
+            };
+            statusToast._focusOut = function() {
+                if (statusTimeout || statusToast.classList.contains('hide')) return;
+                if (!statusHoverHoldActive()) scheduleHide(toastRemaining!=null ? toastRemaining : duration);
+            };
+            statusToast.addEventListener('mouseenter', statusToast._enter);
+            statusToast.addEventListener('mouseleave', statusToast._leave);
+            statusToast.addEventListener('focusin', statusToast._focusIn);
+            statusToast.addEventListener('focusout', statusToast._focusOut);
+            if (statusToast.matches(':hover, :focus-within')) { toastRemaining = duration; toastStart = Date.now(); }
+            else scheduleHide(duration);
+        }
+
+        // ===== Voice Preparing Toast =====
+        var voiceAnimInjected = false;
+        var spinAnimInjected = false;
+
+        function injectVoiceAnimations() {
+            if (voiceAnimInjected) return;
+            voiceAnimInjected = true;
+            var s = document.createElement('style');
+            s.textContent = [
+                '@keyframes voiceToastFadeIn { from { opacity:0; transform:translateX(-50%) scale(0.8); } to { opacity:1; transform:translateX(-50%) scale(1); } }',
+                '@keyframes voiceToastPulse { 0%,100% { transform:scale(1); } 50% { transform:scale(1.1); } }',
+            ].join('\n');
+            document.head.appendChild(s);
+        }
+
+        function injectSpinAnimation() {
+            if (spinAnimInjected) return;
+            spinAnimInjected = true;
+            var s = document.createElement('style');
+            s.textContent = '@keyframes spin { to { transform: rotate(360deg); } }';
+            document.head.appendChild(s);
+        }
+
+        function showVoicePreparing(message) {
+            injectVoiceAnimations();
+            injectSpinAnimation();
+
+            var toast = document.getElementById('voice-preparing-toast');
+            if (!toast) {
+                toast = document.createElement('div');
+                toast.id = 'voice-preparing-toast';
+                document.body.appendChild(toast);
+            }
+
+            toast.style.cssText = [
+                'position:fixed', 'bottom:18%', 'left:50%', 'transform:translateX(-50%)',
+                "background-image:url('/static/icons/reminder_blue.png')",
+                'background-size:100% 100%', 'background-position:center',
+                'background-repeat:no-repeat', 'background-color:transparent',
+                'color:white', 'padding:20px 32px', 'border-radius:16px',
+                'font-size:16px', 'font-weight:600', 'z-index:10000',
+                'display:flex', 'align-items:center', 'gap:12px',
+                'animation:voiceToastFadeIn 0.3s ease',
+                'pointer-events:none', 'width:320px', 'box-sizing:border-box',
+                'justify-content:center',
+            ].join(';');
+
+            toast.innerHTML = '';
+            var spinner = document.createElement('div');
+            spinner.style.cssText = 'width:20px;height:20px;border:3px solid rgba(255,255,255,0.3);border-top-color:white;border-radius:50%;animation:spin 1s linear infinite;';
+            var span = document.createElement('span');
+            span.textContent = message || '';
+            toast.appendChild(spinner);
+            toast.appendChild(span);
+        }
+
+        function hideVoicePreparing() {
+            var toast = document.getElementById('voice-preparing-toast');
+            if (toast) {
+                toast.style.animation = 'voiceToastFadeIn 0.3s ease reverse';
+                setTimeout(function() { toast.style.display = 'none'; }, 300);
+            }
+        }
+
+        function translateText(key, fallback) {
+            try {
+                if (typeof window.safeT === 'function') {
+                    var safeTranslated = window.safeT(key, fallback);
+                    if (typeof safeTranslated === 'string' && safeTranslated && safeTranslated !== key) {
+                        return safeTranslated;
+                    }
+                }
+                if (typeof window.t === 'function') {
+                    var translated = window.t(key, { defaultValue: fallback });
+                    if (typeof translated === 'string' && translated && translated !== key) {
+                        return translated;
+                    }
+                }
+            } catch (_) { }
+            return fallback;
+        }
+
+        // ===== Voice Ready Toast =====
+        function showReadyToSpeak(message) {
+            injectVoiceAnimations();
+
+            var toast = document.getElementById('voice-ready-toast');
+            if (!toast) {
+                toast = document.createElement('div');
+                toast.id = 'voice-ready-toast';
+                document.body.appendChild(toast);
+            }
+
+            toast.style.cssText = [
+                'position:fixed', 'bottom:18%', 'left:50%', 'transform:translateX(-50%)',
+                "background-image:url('/static/icons/reminder_midori.png')",
+                'background-size:100% 100%', 'background-position:center',
+                'background-repeat:no-repeat', 'background-color:transparent',
+                'color:white', 'padding:20px 32px', 'border-radius:16px',
+                'font-size:16px', 'font-weight:600', 'box-shadow:none',
+                'z-index:10000', 'display:flex', 'align-items:center', 'gap:12px',
+                'animation:voiceToastFadeIn 0.3s ease',
+                'pointer-events:none', 'width:320px', 'box-sizing:border-box',
+                'justify-content:center',
+            ].join(';');
+
+            toast.innerHTML = '';
+            var img = document.createElement('img');
+            img.src = '/static/icons/ready_to_talk.png';
+            img.style.cssText = 'width:36px;height:36px;object-fit:contain;display:block;flex-shrink:0;';
+            img.alt = 'ready';
+            var span = document.createElement('span');
+            span.style.cssText = 'display:flex;align-items:center;';
+            span.textContent = message || translateText('app.readyToSpeak', '可以开始说话了！');
+            toast.appendChild(img);
+            toast.appendChild(span);
+
+            setTimeout(function() {
+                toast.style.animation = 'voiceToastFadeIn 0.3s ease reverse';
+                setTimeout(function() { toast.style.display = 'none'; }, 300);
+            }, 2000);
+        }
+
+        // ===== Prominent Notice =====
+        var pnAnimInjected = false;
+        var pnQueue = [];
+        var pnActive = false;
+        var pnActiveKey = '';
+
+        function prominentNoticeDedupeKey(notice) {
+            if (!notice || typeof notice !== 'object') return '';
+            var visibleFields = [
+                notice.kind,
+                notice.code,
+                notice.version,
+                notice.title,
+                notice.message,
+                notice.message_en,
+            ].map(function(value) { return String(value || ''); });
+            return visibleFields.some(Boolean) ? JSON.stringify(visibleFields) : '';
+        }
+
+        function injectPnAnimations() {
+            if (pnAnimInjected) return;
+            pnAnimInjected = true;
+            var s = document.createElement('style');
+            s.textContent = [
+                '@keyframes pnOverlayIn { from{opacity:0} to{opacity:1} }',
+                '@keyframes pnBoxIn { from{opacity:0;transform:scale(0.85)} to{opacity:1;transform:scale(1)} }',
+                '@keyframes pnOverlayOut { from{opacity:1} to{opacity:0} }',
+                '.prominent-notice-body{scrollbar-width:thin;scrollbar-color:rgba(148,163,184,0.62) rgba(15,23,42,0.18);scrollbar-gutter:stable;overscroll-behavior:contain;}',
+                '.prominent-notice-body::-webkit-scrollbar{width:8px;}',
+                '.prominent-notice-body::-webkit-scrollbar-track{background:transparent;}',
+                '.prominent-notice-body::-webkit-scrollbar-thumb{background:rgba(148,163,184,0.42);border-radius:999px;border:2px solid transparent;background-clip:padding-box;}',
+                '.prominent-notice-body::-webkit-scrollbar-thumb:hover{background:rgba(148,163,184,0.62);border:2px solid transparent;background-clip:padding-box;}',
+            ].join('\n');
+            document.head.appendChild(s);
+        }
+
+        function miniMarkdown(text) {
+            var s = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            s = s.replace(/^#{1,6}\s+(.+)$/gm, '<strong>$1</strong>');
+            s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+            s = s.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
+            s = s.replace(/^[-\u2022]\s+(.+)$/gm, '<li style="margin-left:18px;list-style:disc;text-align:left;">$1</li>');
+            s = s.replace(/\n/g, '<br>');
+            s = s.replace(/<\/li><br><li/g, '</li><li');
+            return s;
+        }
+
+        function drainPnQueue() {
+            if (pnActive || pnQueue.length === 0) return;
+            var item = pnQueue.shift();
+            pnActive = true;
+            pnActiveKey = item.dedupeKey;
+            renderProminentNotice(item.notice, function() {
+                pnActive = false;
+                pnActiveKey = '';
+                drainPnQueue();
+            });
+        }
+
+        function renderProminentNotice(notice, onDismiss) {
+            injectPnAnimations();
+
+            var displayText = notice.message || notice.message_en || '';
+
+            // 通知主进程：取消鼠标穿透（需要点击确认按钮）
+            prominentNoticeInteractive = true;
+            stopStatusPointerTracking(true);
+            setToastMouseThrough(false);
+
+            var overlay = document.createElement('div');
+            overlay.id = 'prominent-notice-overlay';
+            overlay.style.cssText = [
+                'position:fixed', 'inset:0',
+                'background:rgba(0,0,0,0.55)',
+                'z-index:2147483647',
+                'display:flex', 'align-items:center', 'justify-content:center',
+                'pointer-events:auto',
+                'animation:pnOverlayIn 0.25s ease',
+            ].join(';');
+
+            var box = document.createElement('div');
+            box.setAttribute('role', 'dialog');
+            box.setAttribute('aria-modal', 'true');
+            box.tabIndex = -1;
+            box.style.cssText = [
+                'position:relative',
+                'background:#1e293b', 'color:#f1f5f9',
+                'border:1px solid rgba(255,255,255,0.12)',
+                'border-radius:16px', 'padding:32px 28px 24px',
+                'width:370px', 'max-width:88vw',
+                'max-height:min(82vh, 720px)', 'box-sizing:border-box',
+                'box-shadow:0 12px 40px rgba(0,0,0,0.5)',
+                'text-align:center', 'pointer-events:auto',
+                'display:flex', 'flex-direction:column', 'align-items:center',
+                'animation:pnBoxIn 0.3s ease',
+            ].join(';');
+
+            var icon = document.createElement('img');
+            icon.src = '/static/icons/exclamation.png';
+            icon.alt = '';
+            icon.style.cssText = 'width:36px;height:36px;margin-bottom:14px;flex-shrink:0;';
+
+            var textDiv = document.createElement('div');
+            textDiv.className = 'prominent-notice-body';
+            textDiv.style.cssText = [
+                'font-size:16px',
+                'font-weight:600',
+                'line-height:1.7',
+                'margin-bottom:22px',
+                'text-align:left',
+                'width:100%',
+                'min-height:0',
+                'flex:1 1 auto',
+                'max-height:min(54vh,420px)',
+                'overflow-y:auto',
+                'overflow-x:hidden',
+                'overflow-wrap:anywhere',
+                'padding-right:8px',
+                'scrollbar-gutter:stable',
+                'scrollbar-width:thin',
+                'scrollbar-color:rgba(148,163,184,0.62) rgba(15,23,42,0.18)',
+                'overscroll-behavior:contain',
+                'box-sizing:border-box',
+            ].join(';');
+            textDiv.innerHTML = miniMarkdown(displayText);
+
+            var hasMore = pnQueue.length > 0;
+            var btn = document.createElement('button');
+            btn.textContent = hasMore
+                ? translateText('common.next', '下一个')
+                : translateText('common.confirm', '确认');
+            btn.style.cssText = [
+                'background:#3b82f6', 'color:#fff', 'border:none',
+                'border-radius:10px', 'padding:10px 48px',
+                'font-size:15px', 'font-weight:600', 'cursor:pointer',
+                'pointer-events:auto', 'transition:background 0.15s',
+                'flex-shrink:0',
+            ].join(';');
+
+            box.appendChild(icon);
+            box.appendChild(textDiv);
+            box.appendChild(btn);
+            overlay.appendChild(box);
+            document.body.appendChild(overlay);
+            btn.focus();
+
+            var dismissed = false;
+            function dismiss() {
+                if (dismissed) return;
+                dismissed = true;
+                overlay.style.animation = 'pnOverlayOut 0.2s ease forwards';
+                setTimeout(function() {
+                    overlay.remove();
+                    prominentNoticeInteractive = false;
+                    onDismiss();
+                    // onDismiss 会同步拉起队列中的下一个重要通知；只有队列真的结束后，
+                    // 才恢复普通状态提示的矩形命中或整窗穿透。
+                    if (!prominentNoticeInteractive) {
+                        if (isStatusToastVisible()) startStatusPointerTracking();
+                        else setToastMouseThrough(true);
+                    }
+                }, 200);
+            }
+            btn.addEventListener('click', dismiss);
+        }
+
+        function showProminentNotice(notice) {
+            if (typeof notice === 'string') notice = { message: notice };
+            var dedupeKey = prominentNoticeDedupeKey(notice);
+            var duplicatePending = dedupeKey && pnQueue.some(function(item) {
+                return item.dedupeKey === dedupeKey;
+            });
+            if (dedupeKey && (pnActiveKey === dedupeKey || duplicatePending)) return;
+            pnQueue.push({ notice: notice, dedupeKey: dedupeKey });
+            drainPnQueue();
+        }
+
+        // ===== IPC 监听（Electron 环境下由 preload-toast.js 注入 API）=====
+        if (api) {
+            // status toast / voice preparing：文本由调用方传入，不依赖 i18n
+            api.onShowStatusToast(function(data) {
+                showStatusToast(data.message, data.duration);
+            });
+            api.onShowVoicePreparing(function(data) {
+                showVoicePreparing(data.message);
+            });
+            api.onHideVoicePreparing(function() {
+                hideVoicePreparing();
+            });
+            // ready-to-speak / prominent notice：需要 window.t()，等待 i18n 就绪
+            api.onShowReadyToSpeak(function(data) {
+                whenI18nReady(function() { showReadyToSpeak(data.message); });
+            });
+            api.onShowProminentNotice(function(data) {
+                whenI18nReady(function() { showProminentNotice(data); });
+            });
+        }
+
+        document.addEventListener('visibilitychange', function() {
+            if (document.hidden) {
+                stopCompactStatusInputRegionTracking();
+                updateCompactStatusInputRegion(false);
+                stopStatusPointerTracking(false);
+            } else if (isStatusToastVisible() && !prominentNoticeInteractive) {
+                trackCompactStatusInputRegionThroughTransition();
+                startStatusPointerTracking();
+            }
+        });
+
+        window.addEventListener('beforeunload', function() {
+            prominentNoticeInteractive = false;
+            stopCompactStatusInputRegionTracking();
+            updateCompactStatusInputRegion(false);
+            stopStatusPointerTracking(true);
+            setToastMouseThrough(true, true);
+        });
+
+        console.log('[Toast] 页面初始化完成');
+    })();
+    </script>
+</body>
+</html>

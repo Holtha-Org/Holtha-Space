@@ -1,0 +1,1838 @@
+# -*- coding: utf-8 -*-
+"""
+Unit tests for ``memory.hybrid_recall``.
+
+Coverage matrix:
+- BM25 ranking: term overlap drives ordering; non-overlap scores 0 (dropped)
+- RRF fusion: dual-list docs outrank single-list docs at same rank
+- Hard filter: score<0 / suppressed / terminal-status reflections dropped
+- Pool composition: archive enters BM25 pool, NOT embedding pool; persona
+  never enters either pool
+- Threshold filter: per-side caps respected
+- Empty query / empty pool / no-overlap → empty results, no crash
+- EmbeddingService unavailable → cosine path returns [], BM25-only fallback
+
+Embedding paths are mocked to avoid loading the local ONNX model in unit
+tests; we exercise the cosine code only via stubbing.
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import tempfile
+import unittest
+from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from memory.hybrid_recall import (
+    _bm25_rank,
+    _rrf_fuse,
+    _tag_tier,
+    _tokenize,
+    hybrid_recall,
+)
+
+
+# ── tokenization ──────────────────────────────────────────────────────
+
+
+class TestTokenize(unittest.TestCase):
+    def test_cjk_generates_2_and_3_grams(self):
+        tokens = _tokenize("博士最爱猫咪", [])
+        # 6 chars → 5 bigrams + 4 trigrams; set dedupes
+        self.assertIn("博士", tokens)
+        self.assertIn("博士最", tokens)
+        self.assertIn("猫咪", tokens)
+
+    def test_latin_split_keeps_len_ge_2(self):
+        tokens = _tokenize("hello world a I'm", [])
+        self.assertIn("hello", tokens)
+        self.assertIn("world", tokens)
+        # len-1 dropped
+        self.assertNotIn("a", tokens)
+        self.assertNotIn("I", tokens)
+
+    def test_mixed_cjk_latin(self):
+        tokens = _tokenize("博士最爱 The Witness", [])
+        # CJK segment → grams
+        self.assertIn("博士", tokens)
+        # Latin segment → tokens (>=2 chars)
+        self.assertIn("The", tokens)
+        self.assertIn("Witness", tokens)
+
+    def test_stop_names_stripped(self):
+        # When "博士" is a stop_name, the CJK segment becomes "最爱猫咪"
+        # and bigrams shouldn't contain "博士".
+        tokens = _tokenize("博士最爱猫咪", ["博士"])
+        self.assertNotIn("博士", tokens)
+        self.assertIn("最爱", tokens)
+
+
+# ── BM25 ranking ─────────────────────────────────────────────────────
+
+
+class TestBM25Rank(unittest.TestCase):
+    def test_overlap_drives_ordering(self):
+        pool = [
+            {"id": "a", "text": "博士最喜欢的游戏是 The Witness"},
+            {"id": "b", "text": "今天的天气真不错"},
+            {"id": "c", "text": "博士喜欢猫咪"},
+        ]
+        ranked = _bm25_rank("博士 游戏", pool, stop_names=[])
+        ids = [d["id"] for d, _ in ranked]
+        # a (has both 博士 and 游戏) ranks first; c (only 博士) second;
+        # b (no overlap) gets score 0 and is dropped
+        self.assertEqual(ids[0], "a")
+        self.assertNotIn("b", ids)
+
+    def test_empty_query_returns_empty(self):
+        pool = [{"id": "a", "text": "anything"}]
+        self.assertEqual(_bm25_rank("", pool, stop_names=[]), [])
+
+    def test_empty_pool_returns_empty(self):
+        self.assertEqual(_bm25_rank("query", [], stop_names=[]), [])
+
+    def test_no_overlap_returns_empty(self):
+        pool = [
+            {"id": "a", "text": "foo bar baz"},
+            {"id": "b", "text": "qux quux"},
+        ]
+        ranked = _bm25_rank("totally unrelated query 完全不相干", pool, stop_names=[])
+        # All score 0 — nothing returned
+        self.assertEqual(ranked, [])
+
+    def test_tokenize_coerces_non_string_text(self):
+        """Regression for codex review (3rd round): normal-path _tokenize 之前
+        漏了 str() coerce，遇到 malformed entry 里 text=list/int 等 truthy
+        non-string 时，``_SPLIT_RE.split`` 抛 TypeError 把整条 hybrid_recall
+        abort（应只 skip 单行）。"""
+        # 不该抛任何异常，return [] (list 走 str() 后变 "[1, 2, 3]" → 一个 Latin token)
+        result = _tokenize([1, 2, 3], [])
+        self.assertIsInstance(result, list)
+        # 应不挂；具体输出无所谓
+        result = _tokenize(12345, [])
+        self.assertIsInstance(result, list)
+        # None 早就 OK
+        self.assertEqual(_tokenize(None, []), [])
+
+    def test_tf_preserved_so_heavy_repeat_outranks_brief(self):
+        """Regression for codex review #1 (commit fd2b75fc4 之前)：
+        ``_extract_keywords`` 返回 set，单 doc 内重复 token 被 dedupe，
+        BM25 的 TF 信号死掉。修正后 ``_tokenize`` 返回 list 保留 multiplicity，
+        同一 term 出现 N 次的 doc 应当显著高于只出现 1 次的 doc。"""
+        pool = [
+            {"id": "heavy", "text": "博士博士博士博士博士最爱博士的游戏"},
+            {"id": "brief", "text": "今天博士跟我说了别的事"},
+        ]
+        ranked = _bm25_rank("博士", pool, stop_names=[])
+        ids = [d["id"] for d, _ in ranked]
+        # heavy 出现 "博士" 多次 → BM25 TF 项给高分；brief 只出现 1 次
+        # → 同样的 IDF 但低 TF。heavy 必须排第一，分数也得明显更高。
+        self.assertEqual(ids[0], "heavy")
+        heavy_score = next(s for d, s in ranked if d["id"] == "heavy")
+        brief_score = next(s for d, s in ranked if d["id"] == "brief")
+        self.assertGreater(heavy_score, brief_score * 1.3,
+                           f"TF 应放大 heavy 优势：heavy={heavy_score:.3f} brief={brief_score:.3f}")
+
+
+# ── RRF fusion ────────────────────────────────────────────────────────
+
+
+class TestRRFFuse(unittest.TestCase):
+    def test_dual_list_doc_outranks_single_list_docs(self):
+        bm25 = [({"id": "a"}, 5.0), ({"id": "b"}, 3.0), ({"id": "c"}, 1.0)]
+        cosine = [({"id": "c"}, 0.9), ({"id": "a"}, 0.5), ({"id": "d"}, 0.4)]
+        fused = _rrf_fuse(bm25, cosine, k=60, budget_total=4)
+        ids = [d["id"] for d in fused]
+        # a is rank 1 in bm25, rank 2 in cosine → highest combined
+        # c is rank 3 in bm25, rank 1 in cosine → second
+        self.assertEqual(ids[0], "a")
+        self.assertEqual(ids[1], "c")
+        # b (only in bm25 rank 2) and d (only in cosine rank 3) follow
+        self.assertIn("b", ids[2:])
+        self.assertIn("d", ids[2:])
+
+    def test_dedup_by_id(self):
+        bm25 = [({"id": "a", "text": "v1"}, 1.0)]
+        cosine = [({"id": "a", "text": "v2"}, 0.5)]
+        fused = _rrf_fuse(bm25, cosine, k=60, budget_total=10)
+        # One unique doc, RRF accumulates from both sides
+        self.assertEqual(len(fused), 1)
+        self.assertEqual(fused[0]["id"], "a")
+        # _rrf_score = 1/61 + 1/61 ≈ 0.0328
+        self.assertAlmostEqual(fused[0]["_rrf_score"], 2.0 / 61, places=6)
+
+    def test_budget_total_caps_output(self):
+        bm25 = [({"id": str(i)}, 10.0 - i) for i in range(20)]
+        cosine = []
+        fused = _rrf_fuse(bm25, cosine, k=60, budget_total=3)
+        self.assertEqual(len(fused), 3)
+
+    def test_doc_without_id_skipped(self):
+        bm25 = [({"id": "a"}, 1.0), ({}, 0.5)]
+        cosine = []
+        fused = _rrf_fuse(bm25, cosine, k=60, budget_total=10)
+        self.assertEqual(len(fused), 1)
+        self.assertEqual(fused[0]["id"], "a")
+
+
+# ── _tag_tier ────────────────────────────────────────────────────────
+
+
+class TestTagTier(unittest.TestCase):
+    def test_stamps_tier_and_target_type_for_reflection(self):
+        items = [{"id": "x", "text": "..."}]
+        out = _tag_tier(items, "reflection")
+        self.assertEqual(out[0]["_tier"], "reflection")
+        self.assertEqual(out[0]["target_type"], "reflection")
+
+    def test_does_not_mutate_original(self):
+        items = [{"id": "x", "text": "..."}]
+        _tag_tier(items, "fact")
+        # Original dict unchanged
+        self.assertNotIn("_tier", items[0])
+        self.assertNotIn("target_type", items[0])
+
+    def test_no_target_type_for_fact(self):
+        items = [{"id": "x"}]
+        out = _tag_tier(items, "fact")
+        # fact tier doesn't need target_type stamp (hard_filter only checks
+        # reflection terminal statuses)
+        self.assertNotIn("target_type", out[0])
+
+    def test_skip_non_dict_entries(self):
+        """Regression for codex review on commit d3880f9c9：facts.json
+        如果混进 non-dict 行（manual edit / 老格式 / 迁移 bug），
+        ``dict(it)`` 会 TypeError/ValueError 把整个 _tag_tier 挂掉，
+        升级成 whole-query 失败。修正后单条 skip，其余继续。"""
+        items = [
+            {"id": "good", "text": "valid entry"},
+            "this is a malformed string row",  # 非 dict
+            ["nested", "list", "row"],         # 非 dict
+            12345,                              # 非 dict
+            {"id": "also_good", "text": "another valid entry"},
+        ]
+        out = _tag_tier(items, "fact")
+        # 两条好 entry 都该出来，三条坏 entry 被 skip
+        self.assertEqual(len(out), 2)
+        self.assertEqual({d["id"] for d in out}, {"good", "also_good"})
+
+
+# ── end-to-end hybrid_recall ─────────────────────────────────────────
+
+
+class TestHybridRecallE2E(unittest.IsolatedAsyncioTestCase):
+    """End-to-end with mocked fact_store + reflection_engine + embedding
+    service. Covers pool composition, hard filter, archive-in-bm25-only,
+    threshold behavior, empty-result path.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+        # Write a fake facts_archive.json — _aload_archive_facts reads it
+        # directly via fact_store._facts_archive_path().
+        self.archive_path = os.path.join(self.tmpdir, "facts_archive.json")
+        with open(self.archive_path, "w", encoding="utf-8") as f:
+            json.dump([
+                {"id": "fa_1", "text": "archived: 博士曾经养过一只猫", "score": 1.0},
+            ], f)
+
+    def _make_stores(self, active_facts, active_reflections):
+        fact_store = MagicMock()
+        fact_store.aload_facts = AsyncMock(return_value=active_facts)
+        fact_store._facts_archive_path = MagicMock(return_value=self.archive_path)
+
+        reflection_engine = MagicMock()
+        reflection_engine.aload_reflections = AsyncMock(return_value=active_reflections)
+        return fact_store, reflection_engine
+
+    async def _run(self, query, active_facts, active_reflections):
+        fact_store, reflection_engine = self._make_stores(active_facts, active_reflections)
+        config_manager = MagicMock()
+        # Two patches:
+        # 1) Mock embedding service to "unavailable" — keeps tests deterministic
+        #    (no ONNX model in CI).
+        # 2) Drop BM25 threshold to 0 — the production default (1.0) is tuned
+        #    for real corpora where IDF is meaningful; in 1-3 doc fixtures
+        #    IDF collapses near zero and clears no threshold. Unit tests assert
+        #    *logic* (filter, pool, fusion), not threshold tuning.
+        with patch("memory.hybrid_recall._cosine_rank", new=AsyncMock(return_value=[])), \
+             patch("memory.hybrid_recall.HYBRID_RECALL_BM25_THRESHOLD", 0.0):
+            return await hybrid_recall(
+                lanlan_name="testcat",
+                query=query,
+                fact_store=fact_store,
+                reflection_engine=reflection_engine,
+                config_manager=config_manager,
+            )
+
+    async def test_pool_includes_archive_in_bm25(self):
+        # Empty active pool; only archive has matching content.
+        res = await self._run("博士 猫", [], [])
+        ids = [r["id"] for r in res["results"]]
+        # fa_1 is from archive — should still be returned via BM25
+        self.assertIn("fa_1", ids)
+        # Tier label should be fact_archive
+        archived = next(r for r in res["results"] if r["id"] == "fa_1")
+        self.assertEqual(archived["tier"], "fact_archive")
+
+    async def test_hard_filter_drops_negative_score(self):
+        facts = [
+            {"id": "good", "text": "博士最喜欢的游戏是 The Witness", "score": 1.0},
+            {"id": "bad",  "text": "博士最喜欢的游戏是 The Witness", "score": -1.0},
+        ]
+        res = await self._run("博士 游戏", facts, [])
+        ids = [r["id"] for r in res["results"]]
+        self.assertIn("good", ids)
+        self.assertNotIn("bad", ids)
+
+    async def test_disputed_reflection_drops_out_of_recall(self):
+        """A net-negative reflection must not survive into recall results."""
+        # ⚠️ 用**真实落盘 schema** 的行，不是手工塞 score 的合成行。
+        # reflections.json 里根本没有 ``score`` 键（evidence 是 reinforcement /
+        # disputation 两个累加器，score 一律读时折算）。上面那条
+        # ``test_hard_filter_drops_negative_score`` 塞了 score 所以一直绿，但它
+        # 证明不了生产行为——真实数据上 ``score is None``，那道过滤整条空转，
+        # 被用户反驳到负分的反思照样被召回、原文注入 context，跟 system prompt
+        # 里的 ban 指令正面打架。这条按真实形状钉住。
+        now_iso = datetime.now().isoformat()
+        reflections = [
+            {
+                "id": "disputed", "text": "博士最喜欢的游戏是 The Witness",
+                "status": "confirmed",
+                "reinforcement": 0.0, "disputation": 2.0,
+                "disp_last_signal_at": now_iso,
+            },
+        ]
+        res = await self._run("博士 游戏", [], reflections)
+        self.assertNotIn("disputed", [r["id"] for r in res["results"]])
+
+    async def test_ignored_reflection_is_not_treated_as_disputed(self):
+        """⚠️ Silence is not objection: a merely-ignored row must stay recallable."""
+        # ``evidence_score`` 转负不止一条路。用户对 surfaced 反思**沉默**时，
+        # post_turn 按 'ignored' 记 reinforcement += -0.2；AI 一次抛 7 条、用户
+        # 当轮没接话，这 7 条就全成了 rein=-0.2 / disp=0 的负分行。按净分一刀切
+        # 会把它们当场从召回里抹掉（对抗审查实测存量里 17.8% 的活跃 reflection
+        # 属于这一类），而两周后用户主动问"我上个月在忙什么"，那批正是该被召回
+        # 的东西。判据必须带上 disputation>0，才等于 _hard_filter 那句
+        # "user has been disputing this more than confirming it"。
+        now_iso = datetime.now().isoformat()
+        reflections = [{
+            "id": "ignored_only", "text": "博士最喜欢的游戏是 The Witness",
+            "status": "confirmed",
+            "reinforcement": -0.2, "disputation": 0.0,
+            "rein_last_signal_at": now_iso,
+        }]
+        res = await self._run("博士 游戏", [], reflections)
+        self.assertIn("ignored_only", [r["id"] for r in res["results"]])
+
+    async def test_reinforced_reflection_survives_recall(self):
+        """Control: same missing score key, net-positive evidence, still recalled."""
+        # 少了这条，上面那条用"把所有 reflection 都过滤掉"也能通过。
+        now_iso = datetime.now().isoformat()
+        reflections = [
+            {
+                "id": "reinforced", "text": "博士最喜欢的游戏是 The Witness",
+                "status": "confirmed",
+                "reinforcement": 2.0, "disputation": 0.0,
+                "rein_last_signal_at": now_iso,
+            },
+        ]
+        res = await self._run("博士 游戏", [], reflections)
+        self.assertIn("reinforced", [r["id"] for r in res["results"]])
+
+    async def test_evidence_free_reflection_still_recalled(self):
+        """A row with no evidence fields at all (net 0) must not be dropped."""
+        # 钉住"只多丢负分行"这条单调性：改动之前 score=None 放行，改动之后
+        # 算出 0.0 仍然放行。
+        reflections = [
+            {"id": "plain", "text": "博士最喜欢的游戏是 The Witness",
+             "status": "confirmed"},
+        ]
+        res = await self._run("博士 游戏", [], reflections)
+        self.assertIn("plain", [r["id"] for r in res["results"]])
+
+    async def test_fact_rows_are_not_evidence_scored(self):
+        """The fact tier is outside the evidence system and must stay untouched."""
+        # facts.json 没有 reinforcement / disputation 字段，也没有写入方给它们
+        # 派信号；给 fact 盖一个恒 0 的 score 是噪音，而 ``evidence_score`` 对
+        # ``protected`` 行返回 +inf —— 那个语义该由将来真加字段的那次改动显式
+        # 决定，不该从这里顺手泛化过去。
+        facts = [{"id": "f_protected", "text": "博士养了只猫", "protected": True}]
+        tagged = _tag_tier(facts, "fact")
+        self.assertNotIn("score", tagged[0])
+        # 且 protected fact 不会被 hard_filter 当 persona 丢掉之外的理由影响：
+        # 这里只断言没有被本次改动加上 score 键。
+
+    async def test_stale_score_key_is_recomputed_not_kept(self):
+        """A stale on-row score snapshot must be overwritten by the live value."""
+        # 手工编辑 / 历史迁移可能留下 score 键，那个值不带衰减、算不准；唯一
+        # 权威是按当前时间现算。写成 setdefault 的话这条会红。
+        now_iso = datetime.now().isoformat()
+        rows = [{
+            "id": "stale", "text": "...", "status": "confirmed",
+            "score": 99.0,  # 陈旧快照
+            "reinforcement": 0.0, "disputation": 3.0,
+            "disp_last_signal_at": now_iso,
+        }]
+        tagged = _tag_tier(rows, "reflection")
+        self.assertLess(tagged[0]["score"], 0.0)
+
+    async def test_tagging_only_ever_drops_rows_never_resurrects_one(self):
+        """``_tag_tier`` must be monotone against a bare ``_hard_filter``."""
+        # ⚠️ 这条钉的是**方向**。``disputation <= 0`` 那支一度写的是
+        # ``d.pop('score', None)``，理由是"回落到不按分过滤，与改动前一致"——
+        # 但改动前 _tag_tier 根本不碰这个键，所以"一致"要求的是不碰而不是删：
+        # 盘上带着陈旧 ``score: -5.0`` 的行原样会被 _hard_filter 丢掉，pop 之后
+        # 反而活了下来，与那句单调性注释正相反。
+        # 只断言 stale_neg 被丢是不够的（把 pop 换成任何别的写法都能过），
+        # 用集合包含关系直接编码"只减不增"。
+        from memory.recall import MemoryRecallReranker
+
+        def _rows():
+            return [
+                {"id": "stale_neg", "text": "陈旧负分", "status": "confirmed",
+                 "score": -5.0},
+                {"id": "silent", "text": "用户没接话", "status": "confirmed",
+                 "reinforcement": -0.2, "disputation": 0.0},
+                {"id": "disputed", "text": "被反驳过", "status": "confirmed",
+                 "reinforcement": 0.0, "disputation": 3.0,
+                 "disp_last_signal_at": datetime.now().isoformat()},
+            ]
+
+        baseline = {
+            r["id"] for r in MemoryRecallReranker._hard_filter(_rows())
+        }
+        tagged = {
+            r["id"] for r in MemoryRecallReranker._hard_filter(
+                _tag_tier(_rows(), "reflection")
+            )
+        }
+        # 前提：裸过滤本来就丢 stale_neg（否则这条测不到任何东西）
+        self.assertNotIn("stale_neg", baseline)
+        self.assertLessEqual(tagged, baseline)
+        # 而"沉默"那类（rein 负、disp=0）必须仍然活着 —— 单调性不能靠一刀切
+        # 多杀来满足，那会把实测 17.8% 的活跃 reflection 一起抹掉。
+        self.assertIn("silent", tagged)
+
+    async def test_hard_filter_drops_suppressed(self):
+        facts = [
+            {"id": "ok", "text": "博士养了只猫", "score": 1.0},
+            {"id": "supp", "text": "博士养了只猫", "score": 1.0, "suppress": True},
+        ]
+        res = await self._run("博士 猫", facts, [])
+        ids = [r["id"] for r in res["results"]]
+        self.assertIn("ok", ids)
+        self.assertNotIn("supp", ids)
+
+    async def test_hard_filter_drops_terminal_reflection(self):
+        reflections = [
+            {"id": "r_active", "text": "博士对长尾问题敏感", "score": 1.0,
+             "status": "confirmed"},
+            {"id": "r_dead",  "text": "博士对长尾问题敏感", "score": 1.0,
+             "status": "denied"},
+        ]
+        res = await self._run("博士 长尾", [], reflections)
+        ids = [r["id"] for r in res["results"]]
+        self.assertIn("r_active", ids)
+        self.assertNotIn("r_dead", ids)
+
+    async def test_empty_query_short_circuits(self):
+        facts = [{"id": "x", "text": "anything", "score": 1.0}]
+        res = await self._run("   ", facts, [])
+        self.assertEqual(res["results"], [])
+        self.assertEqual(res["candidates_total"], 0)
+
+    async def test_no_match_returns_empty_results(self):
+        facts = [{"id": "x", "text": "今天的天气真不错", "score": 1.0}]
+        res = await self._run("完全不相关的 query", facts, [])
+        self.assertEqual(res["results"], [])
+
+    async def test_small_pool_exact_match_clears_production_threshold(self):
+        """Regression for codex P1 on commit ef81ec41a: 之前 BM25 阈值定 1.0，
+        但 Okapi 公式在小 pool 下 IDF 系数本身就矮（单 doc IDF ≈ 0.288），
+        max score 也就 ~0.72 → 永远过不去 1.0 → 新用户 / 小语料下 BM25
+        兜底完全死掉。降到 0.1 后 single-doc exact match 能正常召回。
+
+        本测试**不 patch threshold**，用生产值（0.1）跑，验真实命中。
+        """
+        # 单 fact，query 完全命中：阈值 0.1 必须 clear
+        facts = [{"id": "only_one", "text": "博士最喜欢的游戏是 The Witness",
+                  "score": 1.0}]
+        fact_store, reflection_engine = self._make_stores(facts, [])
+        config_manager = MagicMock()
+        # 关掉 cosine（mock 成 unavailable），证 BM25-only 路径能出结果
+        with patch("memory.hybrid_recall._cosine_rank", new=AsyncMock(return_value=[])):
+            res = await __import__("memory.hybrid_recall", fromlist=["hybrid_recall"]).hybrid_recall(
+                lanlan_name="testcat",
+                query="博士 游戏",
+                fact_store=fact_store,
+                reflection_engine=reflection_engine,
+                config_manager=config_manager,
+            )
+        ids = [r["id"] for r in res["results"]]
+        self.assertIn("only_one", ids,
+                      "single-doc exact match should clear production BM25 threshold 0.1")
+
+    async def test_malformed_entries_dont_kill_whole_query(self):
+        """Regression for codex review on commit 47d0d191f: 单条 malformed
+        entry (text 是 list / score 是 string 等) 不该带挂整个 hybrid_recall
+        → 应只 skip 那一行，其余好的 entry 继续返回。
+
+        修在 ``MemoryRecallReranker._hard_filter`` 加 try/except per-entry。
+        """
+        facts = [
+            # 正常 entry
+            {"id": "good_1", "text": "博士最喜欢的游戏是 The Witness", "score": 1.0},
+            # 坏 entry: text 是 list（manual edit / 老格式残留）
+            {"id": "bad_text", "text": ["this", "is", "wrong"], "score": 1.0},
+            # 坏 entry: score 是 string（无法和 0 比较）
+            {"id": "bad_score", "text": "博士的游戏", "score": "high"},
+            # 正常 entry
+            {"id": "good_2", "text": "博士最爱的游戏 The Witness", "score": 1.0},
+        ]
+        # 不该抛任何异常，good_1 / good_2 都应该被召回
+        res = await self._run("博士 游戏", facts, [])
+        ids = [r["id"] for r in res["results"]]
+        self.assertIn("good_1", ids)
+        self.assertIn("good_2", ids)
+        # 坏 entry 自然不出现
+        self.assertNotIn("bad_text", ids)
+        self.assertNotIn("bad_score", ids)
+
+    async def test_reflection_tagged_as_reflection_tier(self):
+        reflections = [
+            {"id": "r1", "text": "博士对长尾敏感", "score": 1.0, "status": "confirmed"},
+        ]
+        # Query 用 archive 不沾边的词，避免 setUp 里 facts_archive.json
+        # 那条"博士曾经养过一只猫"也被召回干扰断言。
+        res = await self._run("长尾", [], reflections)
+        ids_to_tier = {r["id"]: r["tier"] for r in res["results"]}
+        self.assertIn("r1", ids_to_tier)
+        self.assertEqual(ids_to_tier["r1"], "reflection")
+
+    async def _run_windowed(self, query, active_facts, active_reflections, time_window):
+        fact_store, reflection_engine = self._make_stores(active_facts, active_reflections)
+        config_manager = MagicMock()
+        with patch("memory.hybrid_recall._cosine_rank", new=AsyncMock(return_value=[])), \
+             patch("memory.hybrid_recall.HYBRID_RECALL_BM25_THRESHOLD", 0.0):
+            return await hybrid_recall(
+                lanlan_name="testcat",
+                query=query,
+                fact_store=fact_store,
+                reflection_engine=reflection_engine,
+                config_manager=config_manager,
+                time_window=time_window,
+            )
+
+    async def test_time_window_filters_out_of_window_semantic_match(self):
+        """"语义 + 时间"联合检索：两条都语义命中 query，但只有事件落在
+        time_window 内的那条应被返回，窗口外的被硬过滤掉。"""
+        from datetime import datetime
+        facts = [
+            {"id": "in_win", "text": "博士五月一号聊的旅行计划", "score": 1.0,
+             "event_start_at": "2026-05-01T10:00:00"},
+            {"id": "out_win", "text": "博士三月聊的旅行计划", "score": 1.0,
+             "event_start_at": "2026-03-15T10:00:00"},
+        ]
+        window = (datetime(2026, 5, 1), datetime(2026, 6, 1))  # 五月整月
+        res = await self._run_windowed("旅行 计划", facts, [], window)
+        ids = [r["id"] for r in res["results"]]
+        self.assertIn("in_win", ids)
+        self.assertNotIn("out_win", ids)
+
+    async def test_time_window_falls_back_to_created_at(self):
+        """窗口过滤的锚点：缺 event_start_at 时退回 created_at。"""
+        from datetime import datetime
+        facts = [
+            {"id": "by_created", "text": "博士的旅行计划", "score": 1.0,
+             "created_at": "2026-05-10T10:00:00"},
+        ]
+        window = (datetime(2026, 5, 1), datetime(2026, 6, 1))
+        res = await self._run_windowed("旅行 计划", facts, [], window)
+        self.assertIn("by_created", [r["id"] for r in res["results"]])
+
+    async def test_time_window_anchor_prefers_event_end_over_created_at(self):
+        """锚点优先级 event_end_at → event_start_at → created_at：只有
+        event_end_at（无 start）的条目应按 end 入窗，不能拿写盘时间 created_at
+        误判。这里 event_end_at 在窗口内、created_at 在窗口外，必须命中。"""
+        from datetime import datetime
+        facts = [
+            {"id": "end_only", "text": "博士的旅行计划", "score": 1.0,
+             "event_end_at": "2026-05-20T10:00:00",   # 在五月窗口内
+             "created_at": "2026-07-01T10:00:00"},      # 写盘时间在窗口外
+        ]
+        window = (datetime(2026, 5, 1), datetime(2026, 6, 1))
+        res = await self._run_windowed("旅行 计划", facts, [], window)
+        self.assertIn("end_only", [r["id"] for r in res["results"]])
+
+    async def test_time_window_drops_entry_without_parseable_time(self):
+        """无可解析时间戳的条目在时间检索下判为不在窗口内（宁漏不错挂）。"""
+        from datetime import datetime
+        facts = [
+            {"id": "no_time", "text": "博士的旅行计划", "score": 1.0},
+        ]
+        window = (datetime(2026, 5, 1), datetime(2026, 6, 1))
+        res = await self._run_windowed("旅行 计划", facts, [], window)
+        self.assertEqual(res["results"], [])
+
+
+class TestRecallByTime(unittest.IsolatedAsyncioTestCase):
+    """``recall_by_time`` —— 只给 time、按事件时间邻近返回最接近的若干条
+    fact + reflection。"""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+        self.archive_path = os.path.join(self.tmpdir, "facts_archive.json")
+        with open(self.archive_path, "w", encoding="utf-8") as f:
+            json.dump([], f)
+
+    def _make_stores(self, active_facts, active_reflections):
+        fact_store = MagicMock()
+        fact_store.aload_facts = AsyncMock(return_value=active_facts)
+        fact_store._facts_archive_path = MagicMock(return_value=self.archive_path)
+        reflection_engine = MagicMock()
+        reflection_engine.aload_reflections = AsyncMock(return_value=active_reflections)
+        return fact_store, reflection_engine
+
+    async def _run(self, time_spec, active_facts, active_reflections):
+        from memory.hybrid_recall import recall_by_time
+        fact_store, reflection_engine = self._make_stores(active_facts, active_reflections)
+        return await recall_by_time(
+            lanlan_name="testcat",
+            time_spec=time_spec,
+            fact_store=fact_store,
+            reflection_engine=reflection_engine,
+        )
+
+    async def test_mixes_facts_and_reflections_sorted_by_proximity(self):
+        facts = [
+            {"id": "f_far", "text": "六月的事实", "score": 1.0,
+             "event_start_at": "2026-06-10T10:00:00"},
+            {"id": "f_near", "text": "五月三号买咖啡", "score": 1.0,
+             "event_start_at": "2026-05-03T10:00:00"},
+        ]
+        refl = [
+            {"id": "r_in", "text": "五月一号通宵", "score": 1.0, "status": "confirmed",
+             "event_start_at": "2026-05-01T22:00:00", "event_end_at": "2026-05-02T03:00:00"},
+            {"id": "r_denied", "text": "denied", "score": 1.0, "status": "denied",
+             "event_start_at": "2026-05-01T12:00:00"},
+        ]
+        res = await self._run("2026-05-01", facts, refl)
+        ids = [r["id"] for r in res["results"]]
+        # 窗口内 r_in 最先；f_near（2 天后）次之；f_far（六月）最后。
+        self.assertEqual(ids[0], "r_in")
+        self.assertIn("f_near", ids)
+        # denied 被 _hard_filter 丢掉。
+        self.assertNotIn("r_denied", ids)
+        # fact 和 reflection 都进了结果。
+        tiers = {r["tier"] for r in res["results"]}
+        self.assertEqual(tiers, {"fact", "reflection"})
+
+    async def test_right_boundary_event_ranks_behind_in_window(self):
+        """半开窗口右界：事件正好起于 win_end（如 time='2026-05-01' 时的
+        2026-05-02T00:00:00）虽 dist=0 也算窗口外，必须排在真窗口内条目之后
+        （Codex）。"""
+        facts = [
+            {"id": "boundary", "text": "正好五月二号零点", "score": 1.0,
+             "event_start_at": "2026-05-02T00:00:00"},
+            {"id": "in_may1", "text": "五月一号上午", "score": 1.0,
+             "event_start_at": "2026-05-01T09:00:00"},
+        ]
+        res = await self._run("2026-05-01", facts, [])
+        ids = [r["id"] for r in res["results"]]
+        # 窗口内的 in_may1 必须在右界 boundary 之前
+        self.assertLess(ids.index("in_may1"), ids.index("boundary"))
+
+    async def test_unparseable_time_returns_empty(self):
+        res = await self._run("上周", [{"id": "x", "text": "y", "score": 1.0,
+                                        "created_at": "2026-05-01T10:00:00"}], [])
+        self.assertEqual(res["results"], [])
+
+
+# ── archive half-commit overlap (issue #2528) ─────────────────────────
+
+
+class TestArchiveHalfCommitOverlap(unittest.IsolatedAsyncioTestCase):
+    """A row present in both facts.json and facts_archive.json scores once.
+
+    ``FactStore._archive_absorbed`` writes facts_archive.json before
+    facts.json on purpose: an interrupted commit leaves the row in *both*
+    files rather than in neither. The archive-side cooldown then keeps that
+    state around for up to ``_ARCHIVE_COOLDOWN_HOURS``, so every archive
+    reader has to collapse the overlap — ``FactStore.load_facts_full`` does
+    it for its callers, these two do it for the recall pools.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+        self.archive_path = os.path.join(self.tmpdir, "facts_archive.json")
+
+    def _write_archive(self, rows):
+        with open(self.archive_path, "w", encoding="utf-8") as f:
+            json.dump(rows, f)
+
+    def _make_stores(self, active_facts):
+        fact_store = MagicMock()
+        fact_store.aload_facts = AsyncMock(return_value=active_facts)
+        fact_store._facts_archive_path = MagicMock(return_value=self.archive_path)
+        reflection_engine = MagicMock()
+        reflection_engine.aload_reflections = AsyncMock(return_value=[])
+        return fact_store, reflection_engine
+
+    async def test_half_committed_row_neither_double_scores_nor_evicts(self):
+        """A half-committed row scores once and takes one budget slot."""
+        dup = {"id": "dup", "score": 1.0,
+               "text": "博士 博士 博士 博士最喜欢的游戏 游戏 游戏 The Witness"}
+        solo = {"id": "solo", "score": 1.0, "text": "博士喜欢的游戏是别的"}
+        self._write_archive([dict(dup)])
+        fact_store, reflection_engine = self._make_stores([dup, solo])
+
+        with patch("memory.hybrid_recall._cosine_rank", new=AsyncMock(return_value=[])), \
+             patch("memory.hybrid_recall.HYBRID_RECALL_BM25_THRESHOLD", 0.0), \
+             patch("memory.hybrid_recall.HYBRID_RECALL_BUDGET_EACH", 2):
+            res = await hybrid_recall(
+                lanlan_name="testcat", query="博士 游戏",
+                fact_store=fact_store, reflection_engine=reflection_engine,
+                config_manager=MagicMock(),
+            )
+
+        ids = [r["id"] for r in res["results"]]
+        self.assertEqual(ids.count("dup"), 1, ids)
+        # 名额：两份 dup 会把 BM25 的 top-2 占满，solo 本该被召回却被挤掉。
+        self.assertIn("solo", ids, ids)
+        # 计分：RRF 对同一 id 的每次出现都累加 1/(k+rank)，重复行会拿双倍分。
+        dup_score = next(r["score"] for r in res["results"] if r["id"] == "dup")
+        self.assertAlmostEqual(dup_score, 1.0 / 61, places=6)
+        # 活跃副本胜出（它至少和归档副本一样新，monotonic 标记以它为准）。
+        self.assertEqual(
+            next(r["tier"] for r in res["results"] if r["id"] == "dup"), "fact",
+        )
+
+    async def test_recall_by_time_returns_a_half_committed_row_once(self):
+        """``recall_by_time`` has no fusion step: a duplicate row would
+        simply be returned twice."""
+        from memory.hybrid_recall import recall_by_time
+        dup = {"id": "dup", "text": "五月一号通宵", "score": 1.0,
+               "event_start_at": "2026-05-01T22:00:00"}
+        self._write_archive([dict(dup)])
+        fact_store, reflection_engine = self._make_stores([dup])
+
+        res = await recall_by_time(
+            lanlan_name="testcat", time_spec="2026-05-01",
+            fact_store=fact_store, reflection_engine=reflection_engine,
+        )
+
+        ids = [r["id"] for r in res["results"]]
+        self.assertEqual(ids, ["dup"], ids)
+        self.assertEqual(res["results"][0]["tier"], "fact")
+
+    async def test_archive_only_rows_still_reach_the_pool(self):
+        """Only overlapping ids are collapsed; archive-only rows still recall."""
+        active = [{"id": "act", "text": "博士今天在写代码", "score": 1.0}]
+        self._write_archive([
+            {"id": "arch_only", "text": "博士曾经养过一只猫", "score": 1.0},
+        ])
+        fact_store, reflection_engine = self._make_stores(active)
+
+        with patch("memory.hybrid_recall._cosine_rank", new=AsyncMock(return_value=[])), \
+             patch("memory.hybrid_recall.HYBRID_RECALL_BM25_THRESHOLD", 0.0):
+            res = await hybrid_recall(
+                lanlan_name="testcat", query="博士 猫",
+                fact_store=fact_store, reflection_engine=reflection_engine,
+                config_manager=MagicMock(),
+            )
+
+        ids = [r["id"] for r in res["results"]]
+        self.assertIn("arch_only", ids, ids)
+
+    def test_rows_without_a_usable_id_are_never_folded(self):
+        """Rows without a usable id share no key, so folding them would trade
+        a duplicate for silent data loss."""
+        from memory.hybrid_recall import _drop_archive_overlap
+        # 活跃侧同样可能有手改 / 老库留下的坏 id：把它们原样塞进集合会在
+        # list/dict 上抛 TypeError（unhashable），一条坏行带挂整次召回。
+        active = [
+            {"id": "", "text": "空 id 的活跃行"},
+            {"id": None, "text": "没有 id 的活跃行"},
+            {"id": ["unhashable"], "text": "id 是 list 的活跃行"},
+            {"id": 0, "text": "id 为 0 的 legacy 活跃行"},
+            {"id": "real", "text": "x"},
+        ]
+        archive = [
+            {"id": "", "text": "空 id 的归档行"},
+            {"id": None, "text": "没有 id 的归档行"},
+            {"id": ["unhashable"], "text": "id 是 list 的归档行"},
+            {"id": "real", "text": "真重叠"},
+            {"id": 0, "text": "id 为 0 的 legacy 重叠行"},
+        ]
+        kept = _drop_archive_overlap(archive, active, "testcat")
+        texts = [r["text"] for r in kept]
+        self.assertEqual(len(kept), 3, texts)
+        self.assertNotIn("真重叠", texts)
+        # id 为 0 是完全可用的键（`not fact_id` 会把它误判成没有 id）。
+        self.assertNotIn("id 为 0 的 legacy 重叠行", texts)
+
+
+# ── #2550: hot-path cost removal (no behaviour change) ────────────────
+
+
+def _reference_bm25(query, pool, *, k1=None, b=None):
+    """Deliberately naive Okapi BM25, written straight from the formula.
+
+    ``_bm25_rank`` stopped materializing a whole-vocabulary df table and a
+    per-doc Counter (#2550) — both were built in full and then queried for only
+    the handful of terms actually in the query. This reference exists so that
+    refactor, and any future one, has to reproduce the textbook scores exactly
+    rather than merely "rank things about the same".
+    """
+    import math
+
+    # Track the production constants rather than hard-coding 1.5 / 0.75: if
+    # someone retunes k1/b, this reference must follow them, otherwise the only
+    # symptom is "scores don't match" and the retune looks like a broken
+    # implementation. What is pinned here is the formula, not the tuning.
+    from memory.hybrid_recall import _BM25_B, _BM25_K1
+
+    k1 = _BM25_K1 if k1 is None else k1
+    b = _BM25_B if b is None else b
+
+    q_terms = _tokenize(query, [])
+    if not q_terms or not pool:
+        return []
+    docs = [_tokenize(d.get("text", "") or "", []) for d in pool]
+    n_docs = len(pool)
+    total = sum(len(t) for t in docs)
+    if total == 0:
+        return []
+    avgdl = total / n_docs
+    out = []
+    for doc, terms in zip(pool, docs):
+        if not terms:
+            continue
+        score = 0.0
+        for q in set(q_terms):
+            df = sum(1 for t in docs if q in t)
+            if df <= 0:
+                continue
+            idf = math.log((n_docs - df + 0.5) / (df + 0.5) + 1.0)
+            if idf <= 0:
+                continue
+            tf = terms.count(q)
+            if tf == 0:
+                continue
+            norm = 1.0 - b + b * len(terms) / avgdl
+            score += idf * (tf * (k1 + 1)) / (tf + k1 * norm)
+        if score > 0:
+            out.append((doc, score))
+    out.sort(key=lambda p: p[1], reverse=True)
+    return out
+
+
+class TestBM25MatchesReference(unittest.TestCase):
+    """Scores must stay identical to the textbook formula."""
+
+    def _assert_matches(self, query, pool):
+        got = _bm25_rank(query, pool, stop_names=[])
+        want = _reference_bm25(query, pool)
+        self.assertEqual([d["id"] for d, _ in got], [d["id"] for d, _ in want])
+        for (_, a), (_, b) in zip(got, want):
+            # Not assertAlmostEqual: the optimization deliberately preserves the
+            # float accumulation order, so equality is exact. A near-miss here
+            # means someone reordered the summation, and then ties can flip.
+            self.assertEqual(a, b)
+
+    def test_matches_on_cjk_corpus(self):
+        pool = [
+            {"id": "a", "text": "博士最喜欢的游戏是见证者"},
+            {"id": "b", "text": "博士养了一只猫，猫很喜欢博士"},
+            {"id": "c", "text": "今天天气不错适合出门散步"},
+            {"id": "d", "text": "博士博士博士"},
+        ]
+        self._assert_matches("博士 猫", pool)
+
+    def test_matches_on_mixed_script_corpus(self):
+        pool = [
+            {"id": "a", "text": "博士最喜欢 The Witness 这款游戏"},
+            {"id": "b", "text": "The Witness is a puzzle game"},
+            {"id": "c", "text": "猫咪喜欢晒太阳"},
+        ]
+        self._assert_matches("The Witness 游戏", pool)
+
+    def test_matches_when_some_docs_are_empty(self):
+        # Empty docs still count toward n_docs (and therefore IDF) while being
+        # skipped for scoring — an easy thing to break when rewriting the loop.
+        pool = [
+            {"id": "a", "text": "博士养了一只猫"},
+            {"id": "empty", "text": ""},
+            {"id": "b", "text": "博士今天很开心"},
+        ]
+        self._assert_matches("博士", pool)
+
+    def test_repeated_term_still_outscores_single_mention(self):
+        """TF must survive the df/tf rewrite — the whole point of not deduping."""
+        pool = [
+            {"id": "once", "text": "博士出现一次然后讲别的事情很多别的事情"},
+            {"id": "many", "text": "博士博士博士博士然后讲别的事情很多别的事情"},
+        ]
+        ranked = _bm25_rank("博士", pool, stop_names=[])
+        self.assertEqual(ranked[0][0]["id"], "many")
+
+    def test_no_overlap_scores_nothing(self):
+        pool = [{"id": "a", "text": "完全无关的内容"}]
+        self.assertEqual(_bm25_rank("博士 猫", pool, stop_names=[]), [])
+
+
+class TestCosineDecodesOnce(unittest.IsolatedAsyncioTestCase):
+    """The cosine path must base64-decode each candidate exactly once."""
+
+    async def test_each_candidate_decoded_once(self):
+        import numpy as np
+
+        import memory.embeddings as emb
+        from memory._embeddings.schema import stamp_embedding_fields
+        from memory.hybrid_recall import _cosine_rank
+
+        model_id = "local-text-retrieval-v1-4d-int8"
+        pool = []
+        for i, text in enumerate(["博士喜欢猫", "博士喜欢狗", "今天下雨了"]):
+            entry = {"id": "f%d" % i, "text": text}
+            stamp_embedding_fields(
+                entry,
+                np.array([1.0, 0.0, 0.0, float(i)], dtype=np.float32),
+                text,
+                model_id,
+            )
+            pool.append(entry)
+
+        real_decode = emb._decode_vector_fp16
+        calls = []
+
+        def counting_decode(encoded):
+            calls.append(encoded)
+            return real_decode(encoded)
+
+        service = MagicMock()
+        service.is_available = MagicMock(return_value=True)
+        service.model_id = MagicMock(return_value=model_id)
+        service.embed_batch = AsyncMock(
+            return_value=[np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)],
+        )
+
+        with patch.object(emb, "_decode_vector_fp16", counting_decode), \
+             patch.object(emb, "get_embedding_service", MagicMock(return_value=service)):
+            scored = await _cosine_rank("博士", pool)
+
+        self.assertEqual(len(scored), 3)
+        # One decode per candidate. Two per candidate is the #2550 regression:
+        # is_cached_embedding_valid decoding to check the dimension, throwing the
+        # vector away, then the caller decoding the identical payload again.
+        self.assertEqual(len(calls), len(pool), calls)
+
+    async def test_invalid_fingerprint_still_skipped(self):
+        """Collapsing the two calls must not accidentally accept stale vectors."""
+        import numpy as np
+
+        import memory.embeddings as emb
+        from memory._embeddings.schema import stamp_embedding_fields
+        from memory.hybrid_recall import _cosine_rank
+
+        model_id = "local-text-retrieval-v1-4d-int8"
+        good = {"id": "good", "text": "博士喜欢猫"}
+        stamp_embedding_fields(
+            good, np.array([1.0, 0, 0, 0], dtype=np.float32), good["text"], model_id,
+        )
+        stale = {"id": "stale", "text": "博士喜欢狗"}
+        stamp_embedding_fields(
+            stale, np.array([1.0, 0, 0, 0], dtype=np.float32), "旧文本", model_id,
+        )
+        wrong_model = {"id": "wrong_model", "text": "博士喜欢鸟"}
+        stamp_embedding_fields(
+            wrong_model,
+            np.array([1.0, 0, 0, 0], dtype=np.float32),
+            wrong_model["text"],
+            "someone-elses-model-4d-int8",
+        )
+
+        service = MagicMock()
+        service.is_available = MagicMock(return_value=True)
+        service.model_id = MagicMock(return_value=model_id)
+        service.embed_batch = AsyncMock(
+            return_value=[np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)],
+        )
+        with patch.object(emb, "get_embedding_service", MagicMock(return_value=service)):
+            scored = await _cosine_rank("博士", [good, stale, wrong_model])
+
+        self.assertEqual([d["id"] for d, _ in scored], ["good"])
+
+
+class _ArchiveTmpCase(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        from memory.hybrid_recall import _invalidate_pool_cache
+
+        _invalidate_pool_cache()
+        self.tmpdir = tempfile.mkdtemp()
+        self.archive_path = os.path.join(self.tmpdir, "facts_archive.json")
+        # Clear the cache on the way out as well as on the way in: _POOL_CACHE
+        # is a module global keyed by these temp paths, so without this every
+        # method in every subclass leaves an entry behind for the rest of the
+        # session. Registered before the rmtree cleanup so it runs after it.
+        self.addCleanup(_invalidate_pool_cache)
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+
+    def _store(self):
+        store = MagicMock()
+        store._facts_archive_path = MagicMock(return_value=self.archive_path)
+        return store
+
+    def _write(self, rows):
+        with open(self.archive_path, "w", encoding="utf-8") as f:
+            json.dump(rows, f)
+
+
+class TestArchiveLoadShedsVectors(_ArchiveTmpCase):
+    """Archive rows never enter the embedding pool, so their vectors must not
+    stay resident in the cached pool either — and neither must the write-path
+    fields no recall consumer reads."""
+
+    async def test_row_is_projected_to_recall_fields_only(self):
+        from memory.hybrid_recall import _ARCHIVE_RECALL_KEYS, _aload_archive_facts
+
+        self._write([{
+            # recall reads these
+            "id": "fa_1", "text": "归档的一条", "entity": "master", "score": 1,
+            "created_at": "2026-07-01T12:00:00",
+            "event_start_at": "2026-07-01T12:00:00", "event_end_at": None,
+            "subject_kind": None, "subject_id": None, "scope": None,
+            # nothing on the recall path reads any of these
+            "embedding": "AAAAAAAAAAA=",
+            "embedding_text_sha256": "a" * 64,
+            "embedding_model_id": "local-text-retrieval-v1-4d-int8",
+            "importance": 3, "hash": "b" * 32, "schema_version": 2,
+            "absorbed": True, "signal_processed": True, "tags": [],
+            "source": "user_observation", "speaker_id": None,
+            "event_when_raw": {"offset": 0, "unit": "day"},
+        }])
+        rows = await _aload_archive_facts(self._store(), "testcat")
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+
+        # Content recall depends on survives untouched.
+        self.assertEqual(row["text"], "归档的一条")
+        self.assertEqual(row["id"], "fa_1")
+        self.assertEqual(row["entity"], "master")
+        self.assertEqual(row["created_at"], "2026-07-01T12:00:00")
+
+        # Everything else is gone — including the embedding fingerprints. The
+        # projected row is a recall candidate, not a persistence record; the
+        # on-disk row keeps every field (see the sibling test), so nothing that
+        # re-embeds or restores is reading this shape.
+        self.assertEqual(set(row) - _ARCHIVE_RECALL_KEYS, set())
+        for dropped in (
+            "embedding", "embedding_text_sha256", "embedding_model_id",
+            "importance", "hash", "schema_version", "absorbed",
+            "signal_processed", "tags", "source", "event_when_raw",
+        ):
+            self.assertNotIn(dropped, row)
+
+    async def test_projection_keeps_absent_keys_absent(self):
+        """Sparse in, sparse out: every consumer uses .get(), so materializing
+        the missing keys as None would only cost memory."""
+        from memory.hybrid_recall import _aload_archive_facts
+
+        self._write([{"id": "fa_1", "text": "只有两个字段"}])
+        rows = await _aload_archive_facts(self._store(), "testcat")
+        self.assertEqual(set(rows[0]), {"id", "text"})
+
+    async def test_projected_rows_still_render_every_result_field(self):
+        """End-to-end pin: whatever hybrid_recall puts in a result dict must
+        survive the projection. Catches "added a rendered field but forgot to
+        add it to _ARCHIVE_RECALL_KEYS", which would otherwise go wrong only
+        for archived rows — i.e. only for old memories."""
+        from memory.hybrid_recall import hybrid_recall
+
+        self._write([{
+            "id": "fa_1", "text": "博士养过一只叫做三花的猫", "entity": "master",
+            "score": 1, "created_at": "2026-07-01T12:00:00",
+            "event_start_at": "2026-06-30T20:00:00",
+            "event_end_at": "2026-06-30T22:00:00",
+            "subject_kind": "group_chat", "subject_id": "qq:123", "scope": "group_chat",
+            "importance": 3, "absorbed": True, "embedding": "AAAAAAAAAAA=",
+        }])
+        engine = MagicMock()
+        engine.aload_reflections = AsyncMock(return_value=[])
+        engine._reflections_path = MagicMock(
+            return_value=os.path.join(self.tmpdir, "reflections.json"),
+        )
+        store = self._store()
+        store.aload_facts = AsyncMock(return_value=[])
+        with patch("memory.hybrid_recall._cosine_rank", new=AsyncMock(return_value=[])), \
+             patch("memory.hybrid_recall.HYBRID_RECALL_BM25_THRESHOLD", 0.0):
+            res = await hybrid_recall(
+                lanlan_name="testcat", query="博士 猫",
+                fact_store=store, reflection_engine=engine,
+                config_manager=MagicMock(),
+                subjects=[{
+                    "subject_kind": "group_chat", "subject_id": "qq:123",
+                    "scope": "group_chat",
+                }],
+            )
+        hit = next(r for r in res["results"] if r["id"] == "fa_1")
+        # Each of these is read off the (projected) row by the result builder.
+        self.assertEqual(hit["text"], "博士养过一只叫做三花的猫")
+        self.assertEqual(hit["tier"], "fact_archive")
+        self.assertEqual(hit["entity"], "master")
+        self.assertEqual(hit["subject_kind"], "group_chat")
+        self.assertEqual(hit["subject_id"], "qq:123")
+        self.assertEqual(hit["scope"], "group_chat")
+        self.assertEqual(hit["created_at"], "2026-07-01T12:00:00")
+        self.assertEqual(hit["event_start_at"], "2026-06-30T20:00:00")
+        self.assertEqual(hit["event_end_at"], "2026-06-30T22:00:00")
+        # A projection that dropped a rendered field would surface as None here,
+        # not as a crash — hence the explicit per-field assertions above.
+        self.assertNotIn(None, [hit["entity"], hit["scope"], hit["created_at"]])
+
+    async def test_on_disk_archive_keeps_its_vectors(self):
+        """Shedding happens on read only — the restore path still needs the
+        stored vector, so the file itself must be untouched."""
+        from memory.hybrid_recall import _aload_archive_facts
+
+        self._write([{
+            "id": "fa_1", "text": "归档的一条", "embedding": "AAAAAAAAAAA=",
+        }])
+        await _aload_archive_facts(self._store(), "testcat")
+        with open(self.archive_path, encoding="utf-8") as f:
+            on_disk = json.load(f)
+        self.assertEqual(on_disk[0]["embedding"], "AAAAAAAAAAA=")
+
+    async def test_subject_archived_rows_still_filtered(self):
+        from memory.hybrid_recall import _aload_archive_facts
+
+        self._write([
+            {"id": "keep", "text": "普通归档"},
+            {"id": "gone", "text": "群退场", "subject_archived_at": "2026-07-01T00:00:00"},
+            {"id": "gone2", "text": "仲裁归档", "arbitration_archived_at": "2026-07-01T00:00:00"},
+        ])
+        rows = await _aload_archive_facts(self._store(), "testcat")
+        self.assertEqual([r["id"] for r in rows], ["keep"])
+
+    async def test_missing_archive_is_empty_not_an_error(self):
+        from memory.hybrid_recall import _aload_archive_facts
+
+        rows = await _aload_archive_facts(self._store(), "testcat")
+        self.assertEqual(rows, [])
+
+    async def test_corrupt_archive_degrades_to_empty(self):
+        from memory.hybrid_recall import _aload_archive_facts
+
+        with open(self.archive_path, "w", encoding="utf-8") as f:
+            f.write("{ not json at all")
+        rows = await _aload_archive_facts(self._store(), "testcat")
+        self.assertEqual(rows, [])
+
+
+class TestPoolParseCache(_ArchiveTmpCase):
+    """File-identity cache: reuse while (mtime_ns, size) holds, reload after a
+    write, and never answer "empty" just because the stat failed."""
+
+    async def test_unchanged_file_is_parsed_once(self):
+        from memory.hybrid_recall import _aload_archive_facts
+
+        self._write([{"id": "fa_1", "text": "归档内容"}])
+        store = self._store()
+        first = await _aload_archive_facts(store, "testcat")
+
+        real_open = open
+        opens = []
+
+        def counting_open(path, *a, **kw):
+            opens.append(path)
+            return real_open(path, *a, **kw)
+
+        with patch("builtins.open", counting_open):
+            second = await _aload_archive_facts(store, "testcat")
+            third = await _aload_archive_facts(store, "testcat")
+
+        self.assertEqual(opens, [])
+        self.assertEqual([r["id"] for r in second], ["fa_1"])
+        self.assertIs(second, first)
+        self.assertIs(third, first)
+
+    async def test_rewriting_the_file_invalidates(self):
+        from memory.hybrid_recall import _aload_archive_facts
+
+        store = self._store()
+        self._write([{"id": "fa_1", "text": "第一版"}])
+        first = await _aload_archive_facts(store, "testcat")
+        self.assertEqual([r["id"] for r in first], ["fa_1"])
+
+        self._write([
+            {"id": "fa_1", "text": "第一版"},
+            {"id": "fa_2", "text": "第二版新增"},
+        ])
+        second = await _aload_archive_facts(store, "testcat")
+        self.assertEqual([r["id"] for r in second], ["fa_1", "fa_2"])
+
+    async def test_same_size_rewrite_invalidates_via_mtime(self):
+        from memory.hybrid_recall import _aload_archive_facts
+
+        store = self._store()
+        self._write([{"id": "fa_1", "text": "aaa"}])
+        first = await _aload_archive_facts(store, "testcat")
+        self.assertEqual(first[0]["text"], "aaa")
+
+        # Byte-identical length on purpose, so st_size cannot be what catches
+        # this. mtime is stamped explicitly rather than raced against the clock:
+        # a same-millisecond rewrite is exactly the case a coarse-resolution
+        # filesystem would hide, and the test should be deterministic about it.
+        self._write([{"id": "fa_1", "text": "bbb"}])
+        st = os.stat(self.archive_path)
+        os.utime(self.archive_path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+
+        second = await _aload_archive_facts(store, "testcat")
+        self.assertEqual(second[0]["text"], "bbb")
+
+    async def test_deleting_the_file_drops_the_entry(self):
+        from memory.hybrid_recall import _POOL_CACHE, _aload_archive_facts
+
+        store = self._store()
+        self._write([{"id": "fa_1", "text": "归档内容"}])
+        await _aload_archive_facts(store, "testcat")
+        self.assertIn(self.archive_path, _POOL_CACHE)
+
+        os.remove(self.archive_path)
+        rows = await _aload_archive_facts(store, "testcat")
+        self.assertEqual(rows, [])
+        self.assertNotIn(self.archive_path, _POOL_CACHE)
+
+    async def test_reflections_cache_fails_open_when_file_is_missing(self):
+        """A stat failure must degrade to an uncached read, never to "no rows".
+
+        A cache layer that returned [] here would silently empty the recall
+        pool — invisible in the logs and indistinguishable from "this character
+        genuinely has no reflections".
+        """
+        from memory.hybrid_recall import _aload_reflections_for_recall
+
+        rows = [{"id": "r1", "text": "一条反思", "score": 1.0}]
+        engine = MagicMock()
+        engine._reflections_path = MagicMock(
+            return_value=os.path.join(self.tmpdir, "does_not_exist.json"),
+        )
+        engine.aload_reflections = AsyncMock(return_value=rows)
+
+        got = await _aload_reflections_for_recall(engine, "testcat")
+        self.assertEqual([r["id"] for r in got], ["r1"])
+        engine.aload_reflections.assert_awaited()
+
+    async def test_reflections_cache_fails_open_when_path_helper_raises(self):
+        from memory.hybrid_recall import _aload_reflections_for_recall
+
+        rows = [{"id": "r1", "text": "一条反思", "score": 1.0}]
+        engine = MagicMock()
+        engine._reflections_path = MagicMock(side_effect=RuntimeError("no path"))
+        engine.aload_reflections = AsyncMock(return_value=rows)
+
+        got = await _aload_reflections_for_recall(engine, "testcat")
+        self.assertEqual([r["id"] for r in got], ["r1"])
+
+    async def test_reflections_reuse_cached_rows_while_file_is_unchanged(self):
+        from memory.hybrid_recall import _aload_reflections_for_recall
+
+        path = os.path.join(self.tmpdir, "reflections.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump([{"id": "r1", "text": "一条反思"}], f)
+
+        engine = MagicMock()
+        engine._reflections_path = MagicMock(return_value=path)
+        engine.aload_reflections = AsyncMock(
+            return_value=[{"id": "r1", "text": "一条反思", "score": 1.0}],
+        )
+
+        first = await _aload_reflections_for_recall(engine, "testcat")
+        second = await _aload_reflections_for_recall(engine, "testcat")
+        self.assertIs(first, second)
+        self.assertEqual(engine.aload_reflections.await_count, 1)
+
+    async def test_non_str_path_bypasses_cache_instead_of_statting_an_fd(self):
+        """os.stat also accepts a file descriptor, and anything with __index__
+        (a MagicMock, a stray int) is taken as one — which would key the cache
+        on an unrelated open file and hand back its identity. Such a path must
+        simply bypass the cache."""
+        from memory.hybrid_recall import _POOL_CACHE, _file_identity
+
+        self.assertIsNone(_file_identity(MagicMock()))
+        self.assertIsNone(_file_identity(1))
+        self.assertIsNone(_file_identity(""))
+        self.assertIsNone(_file_identity(None))
+        self.assertEqual(_POOL_CACHE, {})
+
+
+class TestPoolCacheLRU(unittest.IsolatedAsyncioTestCase):
+    """The cache must not keep every character's archive resident forever.
+
+    The original version had no eviction, reasoning that entries are "bounded by
+    (characters x 2 files)". That bounds the entry *count*; what needs bounding
+    is *bytes*. A multi-character install paid for every character it had ever
+    recalled, while normally only one is active.
+    """
+
+    async def asyncSetUp(self):
+        from memory.hybrid_recall import _invalidate_pool_cache
+
+        _invalidate_pool_cache()
+        self.tmpdir = tempfile.mkdtemp()
+        self.addCleanup(_invalidate_pool_cache)
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+
+    def _store_for(self, name):
+        path = os.path.join(self.tmpdir, f"{name}_archive.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump([{"id": f"{name}_1", "text": f"{name} 的归档内容"}], f)
+        store = MagicMock()
+        store._facts_archive_path = MagicMock(return_value=path)
+        return store, path
+
+    async def test_idle_characters_are_evicted(self):
+        from memory.hybrid_recall import _POOL_CACHE, _aload_archive_facts
+
+        with patch("memory.hybrid_recall.HYBRID_RECALL_POOL_CACHE_MAX_FILES", 3):
+            paths = []
+            for i in range(5):
+                store, path = self._store_for(f"char{i}")
+                paths.append(path)
+                await _aload_archive_facts(store, f"char{i}")
+            self.assertEqual(len(_POOL_CACHE), 3)
+            # The three most recent survive; the two oldest are gone.
+            self.assertEqual(list(_POOL_CACHE), paths[2:])
+
+    async def test_reuse_refreshes_recency(self):
+        """A character that keeps being recalled must not be evicted just
+        because it was loaded first."""
+        from memory.hybrid_recall import _POOL_CACHE, _aload_archive_facts
+
+        with patch("memory.hybrid_recall.HYBRID_RECALL_POOL_CACHE_MAX_FILES", 2):
+            store_a, path_a = self._store_for("alpha")
+            store_b, path_b = self._store_for("beta")
+            store_c, path_c = self._store_for("gamma")
+
+            await _aload_archive_facts(store_a, "alpha")
+            await _aload_archive_facts(store_b, "beta")
+            # Touch alpha again — a cache HIT must count as a use.
+            await _aload_archive_facts(store_a, "alpha")
+            await _aload_archive_facts(store_c, "gamma")
+
+            self.assertEqual(len(_POOL_CACHE), 2)
+            self.assertIn(path_a, _POOL_CACHE)   # kept: recently reused
+            self.assertIn(path_c, _POOL_CACHE)   # kept: just loaded
+            self.assertNotIn(path_b, _POOL_CACHE)  # evicted: least recent
+
+    async def test_eviction_does_not_lose_rows_for_the_active_caller(self):
+        """Evicting only drops the cache reference; a caller already holding the
+        rows keeps them, and the next load simply re-parses."""
+        from memory.hybrid_recall import _aload_archive_facts
+
+        with patch("memory.hybrid_recall.HYBRID_RECALL_POOL_CACHE_MAX_FILES", 1):
+            store_a, _ = self._store_for("alpha")
+            rows_a = await _aload_archive_facts(store_a, "alpha")
+            store_b, _ = self._store_for("beta")
+            await _aload_archive_facts(store_b, "beta")  # evicts alpha
+
+            self.assertEqual(rows_a[0]["id"], "alpha_1")  # still usable
+            again = await _aload_archive_facts(store_a, "alpha")
+            self.assertEqual(again[0]["id"], "alpha_1")   # re-parsed, same content
+
+    async def test_single_character_is_never_evicted_by_its_own_reloads(self):
+        """Reloading the same file must not push it out of a size-1 cache —
+        that would turn every recall back into a re-parse."""
+        from memory.hybrid_recall import _POOL_CACHE, _aload_archive_facts
+
+        with patch("memory.hybrid_recall.HYBRID_RECALL_POOL_CACHE_MAX_FILES", 1):
+            store, path = self._store_for("solo")
+            for _ in range(5):
+                await _aload_archive_facts(store, "solo")
+            self.assertEqual(list(_POOL_CACHE), [path])
+
+
+class TestVectorDecodeCache(unittest.IsolatedAsyncioTestCase):
+    """``_VEC_CACHE`` — decode once per (doc, model, text, embedding bytes).
+
+    The cache exists because the decode loop dominated the cosine path
+    (~49ms of ~54ms at 5000 rows) while pool rows were already cached; these
+    tests pin the three content fingerprints that a hit must re-validate and
+    the fall-through-to-full-validation semantics on any mismatch.
+    """
+
+    MODEL_ID = "local-text-retrieval-v1-4d-int8"
+
+    async def asyncSetUp(self):
+        from memory.hybrid_recall import _invalidate_pool_cache
+
+        _invalidate_pool_cache()
+        self.addCleanup(_invalidate_pool_cache)
+
+    def _service(self, qvec):
+        import numpy as np
+
+        service = MagicMock()
+        service.is_available = MagicMock(return_value=True)
+        service.model_id = MagicMock(return_value=self.MODEL_ID)
+        service.embed_batch = AsyncMock(return_value=[np.asarray(qvec, dtype=np.float32)])
+        return service
+
+    def _doc(self, doc_id, text, vec):
+        import numpy as np
+
+        from memory._embeddings.schema import stamp_embedding_fields
+
+        entry = {"id": doc_id, "text": text}
+        stamp_embedding_fields(entry, np.asarray(vec, dtype=np.float32), text, self.MODEL_ID)
+        return entry
+
+    async def test_second_query_decodes_nothing_and_scores_identically(self):
+        import numpy as np
+
+        import memory.embeddings as emb
+        from memory.hybrid_recall import _cosine_rank
+
+        pool = [
+            self._doc("a", "博士喜欢猫", [1.0, 0.0, 0.0, 0.0]),
+            self._doc("b", "博士喜欢狗", [0.0, 1.0, 0.0, 0.0]),
+            self._doc("c", "今天下雨了", [0.0, 0.0, 1.0, 0.0]),
+        ]
+        qvec = [1.0, 0.0, 0.0, 0.0]
+
+        real_decode = emb._decode_vector_fp16
+        calls = []
+
+        def counting_decode(encoded):
+            calls.append(encoded)
+            return real_decode(encoded)
+
+        service = self._service(qvec)
+        with patch.object(emb, "_decode_vector_fp16", counting_decode), \
+             patch.object(emb, "get_embedding_service", MagicMock(return_value=service)):
+            first = await _cosine_rank("博士", pool)
+            self.assertEqual(len(calls), 3)  # cold: one decode per candidate
+
+            calls.clear()
+            second = await _cosine_rank("博士", pool)
+            self.assertEqual(len(calls), 0)  # steady state: pure cache hits
+
+        self.assertEqual(
+            [(d["id"], round(s, 6)) for d, s in first],
+            [(d["id"], round(s, 6)) for d, s in second],
+        )
+
+    async def test_text_edit_invalidates_cached_vector(self):
+        """Text is one of the fingerprints: after an edit (without re-embed)
+        the row must be skipped again, same as uncached validation."""
+        import memory.embeddings as emb
+        from memory.hybrid_recall import _cosine_rank
+
+        doc = self._doc("a", "博士喜欢猫", [1.0, 0.0, 0.0, 0.0])
+        service = self._service([1.0, 0.0, 0.0, 0.0])
+
+        with patch.object(emb, "get_embedding_service", MagicMock(return_value=service)):
+            scored = await _cosine_rank("博士", [dict(doc)])
+            self.assertEqual([d["id"] for d, _ in scored], ["a"])
+
+            edited = dict(doc)
+            edited["text"] = "博士改了文本但没重嵌"
+            scored = await _cosine_rank("博士", [edited])
+        self.assertEqual(scored, [])  # sha(text) mismatch → validation rejects
+
+    async def test_reembedded_row_serves_the_new_vector(self):
+        """Embedding bytes are a fingerprint too: a repair/re-embed that keeps
+        id+text+model must not be served the stale cached vector."""
+        import numpy as np
+
+        import memory.embeddings as emb
+        from memory._embeddings.schema import stamp_embedding_fields
+        from memory.hybrid_recall import _cosine_rank
+
+        near = self._doc("near", "博士喜欢猫", [1.0, 0.0, 0.0, 0.0])
+        far = self._doc("far", "博士喜欢狗", [0.0, 0.0, 0.0, 1.0])
+        pool = [near, far]
+        service = self._service([1.0, 0.0, 0.0, 0.0])
+
+        with patch.object(emb, "get_embedding_service", MagicMock(return_value=service)):
+            scored = await _cosine_rank("博士", pool)
+            self.assertEqual([d["id"] for d, _ in scored][0], "near")
+
+            # Re-embed `near` with a vector pointing away from the query.
+            stamp_embedding_fields(
+                near, np.array([-1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+                near["text"], self.MODEL_ID,
+            )
+            scored = await _cosine_rank("博士", pool)
+        # New bytes → cache miss → re-validated → new vector used.
+        self.assertEqual([d["id"] for d, _ in scored][0], "far")
+
+    async def test_model_switch_invalidates_cached_vector(self):
+        """model_id is a fingerprint: swapping the embedding space must not
+        serve vectors decoded for the old model."""
+        import memory.embeddings as emb
+        from memory.hybrid_recall import _cosine_rank
+
+        doc = self._doc("a", "博士喜欢猫", [1.0, 0.0, 0.0, 0.0])
+
+        with patch.object(
+            emb, "get_embedding_service", MagicMock(return_value=self._service([1.0, 0.0, 0.0, 0.0])),
+        ):
+            scored = await _cosine_rank("博士", [doc])
+            self.assertEqual(len(scored), 1)
+
+            other = self._service([1.0, 0.0, 0.0, 0.0])
+            other.model_id = MagicMock(return_value="other-model-4d-int8")
+            with patch.object(emb, "get_embedding_service", MagicMock(return_value=other)):
+                scored = await _cosine_rank("博士", [doc])
+        # model_id mismatch → decode_valid path also rejects → skipped.
+        self.assertEqual(scored, [])
+
+    async def test_non_string_or_missing_id_bypasses_cache(self):
+        """Malformed ids (missing / non-str) must not crash the cache probe —
+        they simply never cache and always take the validation path."""
+        import memory.embeddings as emb
+        from memory.hybrid_recall import _VEC_CACHE, _cosine_rank
+
+        no_id = self._doc("tmp", "博士喜欢猫", [1.0, 0.0, 0.0, 0.0])
+        del no_id["id"]
+        bad_id = self._doc("tmp2", "博士喜欢狗", [1.0, 0.0, 0.0, 0.0])
+        bad_id["id"] = ["not", "hashable"]
+
+        service = self._service([1.0, 0.0, 0.0, 0.0])
+        with patch.object(emb, "get_embedding_service", MagicMock(return_value=service)):
+            scored = await _cosine_rank("博士", [no_id, bad_id])
+            self.assertEqual(len(scored), 2)
+            scored = await _cosine_rank("博士", [no_id, bad_id])
+            self.assertEqual(len(scored), 2)
+        self.assertEqual(len(_VEC_CACHE), 0)
+
+    async def test_colliding_ids_across_pools_cannot_cross_contaminate(self):
+        """Fact ids are ``fact_{timestamp}_{content_hash[:8]}`` — two characters
+        created in the same second with identical fact text can mint the SAME
+        id. The cache must never let one pool's vector leak into the other's
+        score: fingerprints (text sha + embedding bytes) gate every hit, so a
+        collision with different content is a miss, and a collision with
+        identical content carries an identical vector — harmless either way."""
+        import numpy as np
+
+        import memory.embeddings as emb
+        from memory.hybrid_recall import _cosine_rank
+
+        # Same id, same text, but DIFFERENT embedding bytes: e.g. character B
+        # re-embedded the same fact with a repaired vector.
+        a = self._doc("fact_20260101120000_deadbeef", "同一条文本", [1.0, 0.0, 0.0, 0.0])
+        b = self._doc("fact_20260101120000_deadbeef", "同一条文本", [0.0, 1.0, 0.0, 0.0])
+        service = self._service([1.0, 0.0, 0.0, 0.0])
+
+        with patch.object(emb, "get_embedding_service", MagicMock(return_value=service)):
+            scored_a = await _cosine_rank("查询", [a])
+            # b alone: same id as a's cache entry but different bytes → must
+            # NOT be served a's vector (which would score 1.0).
+            scored_b = await _cosine_rank("查询", [b])
+
+        self.assertEqual(round(scored_a[0][1], 6), 1.0)
+        self.assertEqual(round(scored_b[0][1], 6), 0.0)
+
+    async def test_corrupted_row_stamps_invalidate_cached_vector(self):
+        """Row-local stamps are part of the verdict: a reloaded row carrying
+        the same id / text / embedding bytes but a mismatched or missing
+        ``embedding_model_id`` / ``embedding_text_sha256`` stamp must be
+        skipped — exactly what the uncached validator would do."""
+        import memory.embeddings as emb
+        from memory.hybrid_recall import _cosine_rank
+
+        doc = self._doc("a", "博士喜欢猫", [1.0, 0.0, 0.0, 0.0])
+        service = self._service([1.0, 0.0, 0.0, 0.0])
+
+        with patch.object(emb, "get_embedding_service", MagicMock(return_value=service)):
+            scored = await _cosine_rank("博士", [doc])
+            self.assertEqual(len(scored), 1)  # valid row → cached
+
+            bad_model_stamp = dict(doc)
+            bad_model_stamp["embedding_model_id"] = "someone-elses-model-4d-int8"
+            self.assertEqual(await _cosine_rank("博士", [bad_model_stamp]), [])
+
+            bad_text_stamp = dict(doc)
+            bad_text_stamp["embedding_text_sha256"] = "0" * 64
+            self.assertEqual(await _cosine_rank("博士", [bad_text_stamp]), [])
+
+            missing_stamps = dict(doc)
+            del missing_stamps["embedding_model_id"]
+            del missing_stamps["embedding_text_sha256"]
+            self.assertEqual(await _cosine_rank("博士", [missing_stamps]), [])
+
+    # ---- admission / bounding -------------------------------------
+
+    def _fill_one(self, doc):
+        """Admit one doc through a fresh scan; return its charged byte cost."""
+        import memory.hybrid_recall as hr
+
+        hr._invalidate_vec_cache()
+        vec, _ = hr._cached_doc_vector(doc, doc["text"], self.MODEL_ID, hr._ScanState())
+        self.assertIsNotNone(vec)
+        cost = hr._VEC_CACHE_BYTES
+        hr._invalidate_vec_cache()
+        return cost
+
+    async def test_oversized_pool_keeps_a_stable_prefix_instead_of_thrashing(self):
+        """A pool larger than the cap must settle, not self-destruct.
+
+        A plain LRU under full sequential scans is degenerate: every scan
+        evicts the tail the previous scan just admitted, so iteration always
+        arrives to a miss and the hit rate is zero while every miss still pays
+        admission. The scan guard forbids a scan from evicting rows it touched
+        this round, so the cache freezes on the prefix that fits and the
+        remainder misses forever — degraded but stable.
+
+        Pinned as decode counts: with a 2-entry budget over 3 valid rows,
+        steady state must be exactly ONE decode per query (the row that never
+        fits), not three (thrashing, and not the whole-pool bypass this
+        replaces).
+
+        The pool also carries rows the validator must reject, because "runs
+        degraded" must not become "runs unvalidated" (CodeRabbit nitpick). A
+        pool of only-valid rows would pass this test even if the over-budget
+        path skipped fingerprint checks entirely.
+        """
+        import memory.embeddings as emb
+        import memory.hybrid_recall as hr
+
+        pool = [
+            self._doc("p%d" % i, "第%d条记忆" % i, [1.0, float(i), 0.0, 0.0])
+            for i in range(3)
+        ]
+        # Rows are the same shape, so one row's cost sizes the whole budget.
+        budget = self._fill_one(pool[0]) * 2
+
+        bad_text_stamp = self._doc("bad_text", "戳记失效的记忆", [1.0, 0.0, 0.0, 0.0])
+        bad_text_stamp["embedding_text_sha256"] = "0" * 64
+        bad_model_stamp = self._doc("bad_model", "模型失配的记忆", [1.0, 0.0, 0.0, 0.0])
+        bad_model_stamp["embedding_model_id"] = "someone-elses-model-4d-int8"
+        pool += [bad_text_stamp, bad_model_stamp]
+
+        real_decode = emb._decode_vector_fp16
+        calls = []
+
+        def counting_decode(encoded):
+            calls.append(encoded)
+            return real_decode(encoded)
+
+        service = self._service([1.0, 0.0, 0.0, 0.0])
+        with patch("memory.hybrid_recall.HYBRID_RECALL_VEC_CACHE_MAX_BYTES", budget), \
+             patch.object(emb, "_decode_vector_fp16", counting_decode), \
+             patch.object(emb, "get_embedding_service", MagicMock(return_value=service)):
+            first = await hr._cosine_rank("记忆", pool)
+            self.assertEqual(len(calls), 3)          # cold: every *valid* row decodes
+            self.assertEqual(list(hr._VEC_CACHE), ["p0", "p1"])
+
+            calls.clear()
+            second = await hr._cosine_rank("记忆", pool)
+            self.assertEqual(len(calls), 1)          # only the row that never fits
+            self.assertEqual(list(hr._VEC_CACHE), ["p0", "p1"])
+
+            calls.clear()
+            third = await hr._cosine_rank("记忆", pool)
+            self.assertEqual(len(calls), 1)          # stable, not drifting
+            self.assertEqual(list(hr._VEC_CACHE), ["p0", "p1"])
+
+        # Rejected rows stay rejected on every round — and never consume the
+        # budget that the surviving prefix depends on.
+        for scored in (first, second, third):
+            self.assertEqual({d["id"] for d, _ in scored}, {"p0", "p1", "p2"})
+
+        # And the degraded mode must not change a single score.
+        self.assertEqual(
+            [(d["id"], round(s, 6)) for d, s in first],
+            [(d["id"], round(s, 6)) for d, s in second],
+        )
+        self.assertEqual(
+            [(d["id"], round(s, 6)) for d, s in first],
+            [(d["id"], round(s, 6)) for d, s in third],
+        )
+
+    async def test_cache_is_byte_capped_and_evicts_lru_first(self):
+        """The cap is charged in bytes, and the ledger tracks eviction.
+
+        Entry count is the wrong unit: an entry pins the row's embedding and
+        text strings alongside the fp32 vector, so a count cap under-states
+        resident bytes by roughly 2x at 512d and more at 768d.
+        """
+        import memory.hybrid_recall as hr
+
+        docs = [
+            self._doc("d0", "文本零", [1.0, 0.0, 0.0, 0.0]),
+            self._doc("d1", "文本一", [0.0, 1.0, 0.0, 0.0]),
+            self._doc("d2", "文本二", [1.0, 1.0, 0.0, 0.0]),
+        ]
+        unit = self._fill_one(docs[0])
+        # A charged entry must account for the strings it pins, not just the
+        # vector — that is the whole point of switching the cap to bytes.
+        self.assertGreater(unit, len(docs[0]["embedding"]))
+
+        with patch("memory.hybrid_recall.HYBRID_RECALL_VEC_CACHE_MAX_BYTES", unit * 2):
+            # Each doc gets its own scan, so the scan guard never applies and
+            # ordinary LRU eviction is what we are pinning here.
+            for d in docs:
+                vec, _ = hr._cached_doc_vector(d, d["text"], self.MODEL_ID, hr._ScanState())
+                self.assertIsNotNone(vec)
+            self.assertEqual(list(hr._VEC_CACHE), ["d1", "d2"])
+            self.assertEqual(hr._VEC_CACHE_BYTES, unit * 2)
+
+            # A hit refreshes recency: touching d1 protects it from the
+            # eviction that d0's re-insert then inflicts on d2 instead.
+            hr._cached_doc_vector(docs[1], docs[1]["text"], self.MODEL_ID, hr._ScanState())
+            self.assertEqual(list(hr._VEC_CACHE), ["d2", "d1"])
+            hr._cached_doc_vector(docs[0], docs[0]["text"], self.MODEL_ID, hr._ScanState())
+            self.assertEqual(list(hr._VEC_CACHE), ["d1", "d0"])
+            # Ledger stays exact across evictions — a leak here would silently
+            # shrink the effective cache toward zero over a long process.
+            self.assertEqual(hr._VEC_CACHE_BYTES, unit * 2)
+
+        hr._invalidate_vec_cache()
+        self.assertEqual(hr._VEC_CACHE_BYTES, 0)
+
+    async def test_reinsert_replaces_its_own_charge(self):
+        """Re-admitting an id must swap its charge, not stack a second one.
+
+        A row that gets edited or re-embedded misses, decodes, and lands back
+        under the same id. If the ledger only ever added, every rewrite would
+        leak the old entry's bytes and the effective cache would shrink toward
+        zero over a long-lived process — invisible except as recall latency
+        creeping back up.
+        """
+        import memory.hybrid_recall as hr
+
+        doc = self._doc("d0", "文本零", [1.0, 0.0, 0.0, 0.0])
+        unit = self._fill_one(doc)
+        hr._cached_doc_vector(doc, doc["text"], self.MODEL_ID, hr._ScanState())
+        self.assertEqual(hr._VEC_CACHE_BYTES, unit)
+
+        # Same id, rewritten text + re-embedded vector: a miss that re-admits.
+        # Longer text on purpose, so a stacked ledger cannot coincide with the
+        # correct one.
+        rewritten = self._doc("d0", "文本零已经被改写过了", [0.0, 1.0, 0.0, 0.0])
+        hr._cached_doc_vector(
+            rewritten, rewritten["text"], self.MODEL_ID, hr._ScanState(),
+        )
+        self.assertEqual(list(hr._VEC_CACHE), ["d0"])
+        self.assertEqual(hr._VEC_CACHE_BYTES, hr._VEC_CACHE["d0"][6])
+        self.assertNotEqual(hr._VEC_CACHE_BYTES, unit)  # the charge really moved
+
+        hr._invalidate_vec_cache()
+
+    # ---- hit-path cost ---------------------------------------------
+
+    async def test_steady_state_hit_rehashes_nothing(self):
+        """A hit must not recompute ``sha256(text)``.
+
+        The hit condition re-establishes ``stamp == sha256(text)`` from the
+        delta instead: the same ``text`` *object* (str is immutable, so the
+        same bytes) plus an unchanged row stamp. Re-hashing the whole pool
+        every query to re-derive a fact settled at admission was ~4ms/query at
+        5000 rows — the same waste as the re-decoding this cache removes.
+        """
+        import memory._embeddings.schema as schema
+        import memory.embeddings as emb
+        import memory.hybrid_recall as hr
+
+        pool = [
+            self._doc("a", "博士喜欢猫", [1.0, 0.0, 0.0, 0.0]),
+            self._doc("b", "博士喜欢狗", [0.0, 1.0, 0.0, 0.0]),
+        ]
+        real_hash = schema.embedding_text_sha256
+        hashed = []
+
+        def counting_hash(text):
+            hashed.append(text)
+            return real_hash(text)
+
+        service = self._service([1.0, 0.0, 0.0, 0.0])
+        with patch.object(emb, "_embedding_text_sha256", counting_hash), \
+             patch.object(emb, "get_embedding_service", MagicMock(return_value=service)):
+            await hr._cosine_rank("博士", pool)
+            self.assertEqual(len(hashed), 2)  # cold: validator hashes each row
+
+            hashed.clear()
+            await hr._cosine_rank("博士", pool)
+            self.assertEqual(hashed, [])      # steady state: no hashing at all
+
+    async def test_reloaded_text_object_falls_back_to_full_validation(self):
+        """Identity on ``text`` is a fast path, never a verdict.
+
+        A pool reload hands back an equal-but-distinct ``str``; that must miss
+        and re-run the full validator rather than be served from cache, and the
+        score must come out the same either way.
+        """
+        import memory.embeddings as emb
+        import memory.hybrid_recall as hr
+
+        doc = self._doc("a", "博士喜欢猫", [1.0, 0.0, 0.0, 0.0])
+        real_decode = emb._decode_vector_fp16
+        calls = []
+
+        def counting_decode(encoded):
+            calls.append(encoded)
+            return real_decode(encoded)
+
+        service = self._service([1.0, 0.0, 0.0, 0.0])
+        with patch.object(emb, "_decode_vector_fp16", counting_decode), \
+             patch.object(emb, "get_embedding_service", MagicMock(return_value=service)):
+            first = await hr._cosine_rank("博士", [doc])
+            calls.clear()
+
+            # Same characters, fresh object — exactly what json.load produces.
+            reloaded = dict(doc)
+            reloaded["text"] = "".join(list(doc["text"]))
+            self.assertIsNot(reloaded["text"], doc["text"])
+            self.assertEqual(reloaded["text"], doc["text"])
+            second = await hr._cosine_rank("博士", [reloaded])
+            self.assertEqual(len(calls), 1)  # missed → revalidated, not trusted
+
+        self.assertEqual(round(first[0][1], 6), round(second[0][1], 6))
+
+    async def test_cached_norm_matches_recomputed_norm(self):
+        """Norms ride along with the vector; scores must not drift because of it."""
+        import numpy as np
+
+        import memory.embeddings as emb
+        import memory.hybrid_recall as hr
+
+        pool = [
+            self._doc("a", "博士喜欢猫", [0.3, 0.7, 0.1, 0.9]),
+            self._doc("b", "博士喜欢狗", [0.8, 0.2, 0.6, 0.4]),
+            self._doc("c", "今天下雨了", [0.5, 0.5, 0.5, 0.5]),
+        ]
+        qvec = [0.2, 0.9, 0.3, 0.1]
+        service = self._service(qvec)
+        with patch.object(emb, "get_embedding_service", MagicMock(return_value=service)):
+            cold = await hr._cosine_rank("博士", pool)
+            warm = await hr._cosine_rank("博士", pool)
+
+        qarr = np.asarray(qvec, dtype=np.float32)
+        qnorm = float(np.linalg.norm(qarr))
+        expected = {}
+        for doc in pool:
+            cvec = emb.decode_valid_cached_embedding(doc, doc["text"], self.MODEL_ID)
+            carr = np.asarray(cvec, dtype=np.float32)
+            expected[doc["id"]] = float(
+                np.dot(qarr, carr) / (qnorm * float(np.linalg.norm(carr)))
+            )
+
+        for scored in (cold, warm):
+            for doc, score in scored:
+                self.assertAlmostEqual(score, expected[doc["id"]], places=6)
+        self.assertEqual(
+            [(d["id"], round(s, 6)) for d, s in cold],
+            [(d["id"], round(s, 6)) for d, s in warm],
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

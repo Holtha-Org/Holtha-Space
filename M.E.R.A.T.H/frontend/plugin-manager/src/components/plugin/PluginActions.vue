@@ -1,0 +1,234 @@
+<template>
+  <div class="plugin-actions">
+    <el-button
+      v-if="uiAction"
+      type="primary"
+      plain
+      :icon="Monitor"
+      @click="handleOpenUi"
+      :disabled="uiDisabled"
+    >
+      {{ uiActionLabel }}
+    </el-button>
+    <el-button-group>
+      <el-button
+        v-if="status !== 'running'"
+        type="success"
+        :icon="VideoPlay"
+        @click="handleStart"
+        :loading="loading"
+      >
+        {{ t('plugins.start') }}
+      </el-button>
+      <el-button
+        v-if="status === 'running'"
+        type="warning"
+        :icon="VideoPause"
+        @click="handleStop"
+        :loading="loading"
+      >
+        {{ t('plugins.stop') }}
+      </el-button>
+      <el-button
+        type="primary"
+        :icon="Refresh"
+        @click="handleReload"
+        :loading="loading"
+      >
+        {{ t('plugins.reload') }}
+      </el-button>
+    </el-button-group>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, inject } from 'vue'
+import { useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
+import { VideoPlay, VideoPause, Refresh, Monitor } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { usePluginStore } from '@/stores/plugin'
+import { resolveLocalizedText } from '@/utils/i18nLabel'
+import { openExternalUrl } from '@/utils/openExternal'
+import { isOpenUiNavigationAction } from '@/utils/pluginListActions'
+import { formatHttpError } from '@/utils/request'
+import { PLUGIN_DETAIL_REFRESH_HOSTED_PANELS_KEY } from '@/views/pluginDetailHostedPanelRefresh'
+
+interface Props {
+  pluginId: string
+}
+
+const props = defineProps<Props>()
+const pluginStore = usePluginStore()
+const router = useRouter()
+const { t, locale } = useI18n()
+
+const loading = ref(false)
+const refreshHostedPanelsAfterRuntimeChange = inject<(() => Promise<void>) | null>(
+  PLUGIN_DETAIL_REFRESH_HOSTED_PANELS_KEY,
+  null,
+)
+
+const currentPlugin = computed(() => {
+  return pluginStore.pluginsWithStatus.find(p => p.id === props.pluginId)
+})
+
+const status = computed(() => currentPlugin.value?.status || 'stopped')
+const uiAction = computed(() => {
+  return currentPlugin.value?.list_actions?.find(isOpenUiNavigationAction) || null
+})
+const uiDisabled = computed(() => {
+  if (!uiAction.value) return true
+  if (uiAction.value.disabled) return true
+  if (uiAction.value.requires_running && status.value !== 'running') return true
+  return false
+})
+// label 可能是 string 或 locale-keyed dict（与 backend list_action contract
+// 对齐，见 utils/i18nLabel.ts）。直接 `{{ uiAction.label }}` 在 dict 时会
+// 渲染成 "[object Object]"，必须先按当前 locale 解析。
+const uiActionLabel = computed(() =>
+  resolveLocalizedText(uiAction.value?.label, locale.value, t('plugins.ui.open')),
+)
+
+function showActionError(error: any, fallbackMessage: string) {
+  const status = error?.response?.status
+  if (error?.request && !error?.response) {
+    return
+  }
+  if (typeof status === 'number' && ![401, 403, 404].includes(status)) {
+    return
+  }
+  ElMessage.error(formatHttpError(error) || fallbackMessage)
+}
+
+async function handleOpenUi() {
+  if (!uiAction.value || uiDisabled.value) {
+    return
+  }
+
+  // 尊重 backend 的 list_action 契约（plugin/server/application/plugins/ui_query_service.py
+  // _normalize_list_action 会显式 normalize `target` 和 `open_in`）。
+  // 若 plugin 声明了外部 URL / 自定义路由 / 新 tab 打开，UI 必须按字段路由，
+  // 而不是无条件回退到默认的 `/plugins/{id}?tab=ui` 静态详情页。
+  const action = uiAction.value
+
+  // 与 usePluginListContextActions.ts confirmIfNeeded 行为对齐：跳转前若
+  // plugin 声明了 confirm_message 就弹 dialog 确认，否则按钮会绕过 plugin
+  // 自己配的二次确认。`confirm_mode === 'hold'` 依赖 PluginDangerConfirmDialog
+  // 这种 host 组件呈现，按钮上下文不支持，跳过即可（plugin 给 kind: "ui"
+  // 配 hold mode 极少见）。
+  if (action.confirm_mode !== 'hold') {
+    const confirmMsg = resolveLocalizedText(action.confirm_message, locale.value, '')
+    if (confirmMsg) {
+      try {
+        await ElMessageBox.confirm(confirmMsg, t('common.confirm'), {
+          type: action.danger ? 'warning' : 'info',
+        })
+      } catch {
+        return
+      }
+    }
+  }
+
+  const target = action.target?.trim() || ''
+  // open_in 缺省时统一默认 new_tab，与 usePluginListContextActions.ts:366
+  // 的 list-action executor convention 对齐（`open_in === 'same_tab' ? '_self'
+  // : '_blank'`）。否则同一个 plugin manager 里 Open UI 按钮和右键菜单
+  // action 行为分叉，用户体验不一致。
+  const openInNewTab = action.open_in !== 'same_tab'
+
+  // 显式 target：用 browser navigation（window.open），不走 SPA router——
+  // 与 list-action executor 的 ui/url 分支行为一致。SPA router（
+  // src/router/index.ts）只认识 manager 内部路由（/plugins/:id 等），plugin
+  // server 暴露的 path（如 /plugin/<id>/ui/）和外部 URL 都得走 browser
+  // navigation 才能正确跳转，否则 same_tab + plugin-server path 会被当
+  // unmatched SPA route，UI 不打开。
+  // _blank 走 openExternalUrl：Electron host 下会经 electronShell 转发给
+  // 系统浏览器，避免落到嵌入 webview 里没有关闭按钮把用户困住。
+  if (target) {
+    if (action.kind === 'route') {
+      await router.push(target)
+      return
+    }
+    if (openInNewTab) {
+      openExternalUrl(target)
+    } else {
+      window.open(target, '_self')
+    }
+    return
+  }
+
+  // 无 target 时退回默认 plugin 详情页 ?tab=ui，这是 manager 内部路由，
+  // 用 router.push 走 SPA 内导航更平顺；new_tab 时仍 window.open 新窗口。
+  const fallback = {
+    path: `/plugins/${encodeURIComponent(props.pluginId)}`,
+    query: { tab: 'ui' },
+  }
+  if (openInNewTab) {
+    const resolved = router.resolve(fallback)
+    openExternalUrl(resolved.href)
+  } else {
+    await router.push(fallback)
+  }
+}
+
+async function handleStart() {
+  try {
+    loading.value = true
+    await pluginStore.start(props.pluginId)
+    // Hosted panel 的 context 刷新是尽力而为的后续动作（内部还带重试延时），
+    // 不能 await —— 否则每个插件的启停按钮都要多转两秒，成功提示也跟着晚发。
+    void refreshHostedPanelsAfterRuntimeChange?.().catch(() => {})
+    ElMessage.success(t('messages.pluginStarted'))
+  } catch (error: any) {
+    showActionError(error, t('messages.startFailed'))
+  } finally {
+    loading.value = false
+  }
+}
+
+async function handleStop() {
+  try {
+    await ElMessageBox.confirm(t('messages.confirmStop'), t('common.confirm'), {
+      type: 'warning'
+    })
+    loading.value = true
+    await pluginStore.stop(props.pluginId)
+    void refreshHostedPanelsAfterRuntimeChange?.().catch(() => {})
+    ElMessage.success(t('messages.pluginStopped'))
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      showActionError(error, t('messages.stopFailed'))
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
+async function handleReload() {
+  try {
+    await ElMessageBox.confirm(t('messages.confirmReload'), t('common.confirm'), {
+      type: 'warning'
+    })
+    loading.value = true
+    await pluginStore.reload(props.pluginId)
+    void refreshHostedPanelsAfterRuntimeChange?.().catch(() => {})
+    ElMessage.success(t('messages.pluginReloaded'))
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      showActionError(error, t('messages.reloadFailed'))
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
+</script>
+
+<style scoped>
+.plugin-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+</style>

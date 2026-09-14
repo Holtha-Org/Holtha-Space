@@ -1,0 +1,4600 @@
+@import url('base.css');
+/* Frozen legacy `full` minimized breathing-light orb — isolated, gated on
+   .is-legacy-full-ball; never affects the compact yarn ball. */
+@import url('full-chat-minimize.css');
+
+:root {
+    --neko-model-opacity-transition: opacity 280ms ease-in;
+    --neko-model-transform-transition: transform 400ms cubic-bezier(0.22, 1, 0.36, 1);
+    --neko-model-visibility-delay: 400ms;
+}
+
+html,
+body {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    /* background: #fff; */
+    background: transparent !important;
+    color: #222;
+    font-family: 'Segoe UI', Arial, sans-serif;
+    pointer-events: none;
+    /* 允许鼠标事件穿透 */
+    overflow: hidden;
+    /* 防止出现滚动条 */
+}
+
+
+/* 右上角蓝色状态栏提示气泡框样式 */
+/* Status 气泡框样式 - 更显眼的样式 */
+#status-toast {
+    position: fixed;
+    --neko-status-toast-crop-safe-area-top: calc(var(--neko-niri-pet-crop-offset-y, 0) * 1px);
+    top: calc(20px + var(--neko-status-toast-crop-safe-area-top));
+    right: 20px;
+    z-index: 99999;
+    max-width: 500px;
+    min-width: 280px;
+    padding: 18px 24px;
+    padding-left: 50px;
+    /* 为左上角的猫爪留出空间 */
+    /* 自定义背景图片 */
+    background-image: url('/static/icons/toast_background.png');
+    /* 图片路径 */
+    background-size: 100% 100%;
+    /* 强制拉伸到100%覆盖，避免边缘露出 */
+    background-position: center;
+    /* 居中显示 */
+    background-repeat: no-repeat;
+    /* 不重复 */
+    background-origin: border-box;
+    /* 背景从边框区域开始 */
+    background-clip: border-box;
+    /* 背景裁剪到边框区域 */
+    /* 如果图片加载失败，使用备用背景色 */
+    background-color: transparent;
+    /* 移除备用背景色，避免白色边框 */
+    color: #fff;
+    /* 纯白色文字 */
+    text-shadow: 0 1px 3px rgba(0,0,0,0.35);
+    border-radius: 12px;
+    font-size: 18px;
+    /* 字体大小 */
+    font-weight: 500;
+    line-height: 1.6;
+    box-shadow: none;
+    /* 移除阴影 */
+    border: none;
+    /* 移除边框，避免白色边框问题 */
+    overflow: hidden;
+    /* 确保背景图片不会超出圆角 */
+    opacity: 0;
+    transform: translateY(-20px) scale(0.95);
+    transition: all 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+    pointer-events: none;
+    /* 默认不响应事件 */
+    overflow-wrap: break-word;
+    white-space: pre-wrap;
+    display: flex;
+    /* 使用flex布局 */
+    align-items: center;
+    /* 垂直居中对齐 */
+    visibility: visible;
+    /* 确保元素可见 */
+    text-align: center;
+}
+
+
+
+/* 左上角的小猫爪爪 */
+#status-toast::before {
+    content: '🐾';
+    position: absolute;
+    top: 50%;
+    left: 12px;
+    transform: translateY(-50%);
+    font-size: 50px;
+    line-height: 1;
+    opacity: 1;
+    filter: brightness(0) invert(1);
+    z-index: 0;
+    pointer-events: none;
+}
+
+/* 弹跳动画只在 toast 可见时运行：默认态 toast 以 opacity:0 隐藏（非 display:none），
+   若动画挂在基础态上会在两个窗口里以显示器刷新率永久空转（合成器无法休眠）。 */
+#status-toast.show::before {
+    animation: pawBounce 1.5s ease-in-out infinite;
+}
+
+/* 小猫爪爪弹跳动画 */
+@keyframes pawBounce {
+
+    0%,
+    100% {
+        transform: translateY(-50%) rotate(0deg);
+        /* 保持垂直居中 */
+    }
+
+    25% {
+        transform: translateY(calc(-50% - 3px)) rotate(-5deg);
+        /* 保持垂直居中并添加动画 */
+    }
+
+    75% {
+        transform: translateY(calc(-50% - 3px)) rotate(5deg);
+        /* 保持垂直居中并添加动画 */
+    }
+}
+
+/* 显示状态提示气泡框 */
+#status-toast.show {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    pointer-events: auto;
+}
+
+/* 状态提示气泡框滑动入动画 */
+@keyframes slide-in-toast {
+    0% {
+        opacity: 0;
+        transform: translateY(-20px) scale(0.8);
+    }
+
+    100% {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+#status-toast-text{position:relative;z-index:1;flex:1;min-width:0;overflow-wrap:anywhere;cursor:copy;user-select:text;-webkit-user-select:text}
+#status-toast-text.status-toast-copy-success{animation:statusToastCopySuccess 0.45s ease}
+#status-toast-text:focus-visible{outline:2px solid rgba(255,255,255,0.9);outline-offset:2px;border-radius:4px}
+@keyframes statusToastCopySuccess{0%,100%{filter:none}45%{filter:drop-shadow(0 0 7px rgba(210,255,220,0.95));color:#e1ffe8}}
+#status-toast-close{position:absolute;top:6px;right:8px;z-index:2;width:22px;height:22px;border:none;border-radius:50%;background:rgba(255,255,255,0.22);cursor:pointer;padding:0;opacity:0.85;transition:background 0.15s,opacity 0.15s;text-shadow:none;font-size:0;line-height:0}
+#status-toast.show #status-toast-close{pointer-events:auto}
+#status-toast-close::before,#status-toast-close::after{content:"";position:absolute;left:50%;top:50%;width:10px;height:2px;border-radius:999px;background:#fff;pointer-events:none}
+#status-toast-close::before{transform:translate(-50%,-50%) rotate(45deg)}
+#status-toast-close::after{transform:translate(-50%,-50%) rotate(-45deg)}
+#status-toast-close:hover{background:rgba(255,255,255,0.38);opacity:1}
+#status-toast-close:active{transform:scale(0.92)}
+#status-toast-close:focus-visible{outline:2px solid rgba(255,255,255,0.9);outline-offset:2px}
+#status-toast{padding-right:36px}
+
+@media (max-width:600px){
+    #status-toast{padding-right:36px}
+}
+
+/* 状态提示气泡框滑动出动画 */
+#status-toast.hide {
+    opacity: 0;
+    transform: translateY(-20px) scale(0.95);
+    animation: none;
+    pointer-events: none;
+}
+
+.home-avatar-floating-guide-player {
+    position: fixed;
+    right: 18px;
+    bottom: 70px;
+    z-index: 100040;
+    width: min(360px, calc(100vw - 36px));
+    padding: 14px;
+    border: 1px solid rgba(255, 255, 255, 0.45);
+    border-radius: 8px;
+    background: rgba(23, 28, 38, 0.88);
+    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.24);
+    color: #fff;
+    pointer-events: auto;
+    backdrop-filter: blur(14px);
+}
+
+.home-avatar-floating-guide-kicker {
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.4;
+}
+
+.home-avatar-floating-guide-title {
+    margin: 4px 0 8px;
+    font-size: 17px;
+    font-weight: 700;
+    line-height: 1.35;
+}
+
+.home-avatar-floating-guide-text {
+    margin: 0;
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 14px;
+    line-height: 1.55;
+}
+
+.home-avatar-floating-guide-meta {
+    margin-top: 10px;
+    color: rgba(255, 255, 255, 0.58);
+    font-size: 11px;
+    line-height: 1.4;
+}
+
+.home-avatar-floating-guide-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.home-avatar-floating-guide-actions button {
+    min-width: 56px;
+    height: 30px;
+    padding: 0 10px;
+    border: 1px solid rgba(255, 255, 255, 0.24);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.12);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.home-avatar-floating-guide-actions button:hover,
+.home-avatar-floating-guide-actions button:focus-visible {
+    border-color: rgba(255, 255, 255, 0.56);
+    background: rgba(255, 255, 255, 0.22);
+    outline: none;
+}
+
+.home-avatar-floating-guide-actions button:disabled {
+    cursor: default;
+    opacity: 0.45;
+}
+
+[data-home-avatar-floating-guide-highlight="true"] {
+    outline: 3px solid rgba(255, 231, 122, 0.95) !important;
+    outline-offset: 4px !important;
+    filter: drop-shadow(0 0 10px rgba(255, 231, 122, 0.82));
+}
+
+[data-home-avatar-floating-guide-highlight="true"][data-home-avatar-floating-guide-role="persistent"] {
+    outline-color: rgba(120, 205, 255, 0.92) !important;
+    filter: drop-shadow(0 0 10px rgba(120, 205, 255, 0.54));
+}
+
+[data-home-avatar-floating-guide-highlight="true"][data-home-avatar-floating-guide-role="action"] {
+    outline-color: rgba(255, 231, 122, 0.95) !important;
+    filter: drop-shadow(0 0 12px rgba(255, 231, 122, 0.86));
+}
+
+/* 移动端响应式设计 */
+@media (max-width: 600px) {
+    #status-toast {
+        top: calc(10px + var(--neko-status-toast-crop-safe-area-top));
+        right: 10px;
+        left: 10px;
+        max-width: none;
+        font-size: 17px;
+        /* 移动端字体大小 */
+        padding: 16px 20px;
+        padding-left: 45px;
+        padding-right: 36px;
+        /* 为左上角的猫爪留出空间 */
+    }
+
+    /* 移动端猫爪图标位置调整 */
+    #status-toast::before {
+        top: 6px;
+        left: 10px;
+        font-size: 40px;
+        transform: translateY(0);
+        /* 增大移动端猫爪图标 */
+    }
+
+    /* 移动端状态提示气泡框滑动入动画 */
+    #status-toast.show {
+        transform: translateY(0) scale(1);
+    }
+
+    /* 移动端状态提示气泡框滑动出动画 */
+    #status-toast.hide {
+        transform: translateY(-20px) scale(0.95);
+    }
+
+    .home-avatar-floating-guide-player {
+        right: 10px;
+        bottom: 118px;
+        left: 10px;
+        width: auto;
+    }
+}
+
+/* 全局按钮样式 - 防止文字被选中 */
+button {
+    user-select: none;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+}
+
+/* 防止所有图标、图片、按钮内容被选中和拖动 */
+img {
+    user-select: none;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+    -webkit-user-drag: none;
+    -khtml-user-drag: none;
+    -moz-user-drag: none;
+    -o-user-drag: none;
+    pointer-events: none;
+    /* 图标不响应鼠标事件 */
+}
+
+/* 按钮内的所有内容（包括emoji图标）不可选中 */
+button * {
+    user-select: none;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+    pointer-events: none;
+    /* 按钮内部元素不响应事件，由按钮本身处理 */
+}
+
+/* 响应式设计 */
+@media (max-width: 480px) {
+    .container {
+        width: 100%;
+        height: 100%;
+    }
+}
+
+/* 看板娘判定框-容器 */
+#live2d-container {
+    position: fixed;
+    right: 0px;
+    bottom: 0px;
+    width: 100%;
+    height: 100%;
+    z-index: 10;
+    pointer-events: none;
+    background: transparent !important;
+    background-color: transparent !important;
+    opacity: 1;
+    overflow: hidden;
+    visibility: visible;
+    transition: var(--neko-model-opacity-transition), var(--neko-model-transform-transition), height 0ms var(--neko-model-visibility-delay), width 0ms var(--neko-model-visibility-delay), visibility 0ms var(--neko-model-visibility-delay);
+    /* GPU 合成层隔离：减少窗口级重绘对 canvas 的影响 */
+    will-change: transform;
+    transform: translateZ(0);
+    transform-origin: var(--neko-model-exit-origin-x, 50%) var(--neko-model-exit-origin-y, 50%);
+}
+
+/* 看板娘判定框-最小化状态 */
+#live2d-container.minimized {
+    transform: scale(0.38) translateZ(0);
+    /* 原处缩小渐隐（配合模型/猫切换遮罩） */
+    opacity: 0;
+}
+
+/* 看板娘判定框-悬停时半透明 */
+#live2d-container.locked-hover-fade,
+#vrm-container.locked-hover-fade,
+#pngtuber-container.locked-hover-fade {
+    opacity: 0.12;
+}
+
+/* 看板娘画布样式 */
+#live2d-canvas {
+    right: 0;
+    bottom: 0;
+    pointer-events: none;
+    /* width: auto; */
+    /* height: auto; */
+    display: block;
+    opacity: 1;
+    visibility: visible;
+    background: transparent !important;
+    background-color: transparent !important;
+    /* GPU 合成层隔离 */
+    will-change: transform;
+    transform: translateZ(0);
+    transform-origin: var(--neko-model-exit-origin-x, 50%) var(--neko-model-exit-origin-y, 50%);
+}
+
+/* 看板娘判定框-最小化状态时画布透明 */
+#live2d-canvas.minimized {
+    opacity: 0;
+    visibility: hidden;
+}
+
+/* 看板娘VR模型判定框-容器 */
+#vrm-container {
+    position: fixed;
+    right: 0px;
+    bottom: 0px;
+    width: 100%;
+    height: 100%;
+    z-index: 10;
+    pointer-events: none;
+    background: none;
+    opacity: 1;
+    overflow: hidden;
+    visibility: visible;
+    /* 【修复】仅过渡 opacity 和 transform，排除 visibility 的过渡影响，
+     * 避免 MMD 模式下隐藏 VRM 容器时因 transition: all 导致约 1s 的视觉
+     * 残留窗口，使 VRM canvas 中缓存的旧模型（如 sister1.0）短暂可见。 */
+    transition: var(--neko-model-opacity-transition), var(--neko-model-transform-transition);
+    /* GPU 合成层隔离：减少窗口级重绘对 canvas 的影响 */
+    will-change: transform;
+    transform: translateZ(0);
+    transform-origin: var(--neko-model-exit-origin-x, 50%) var(--neko-model-exit-origin-y, 50%);
+}
+
+/* 看板娘MMD模型判定框-容器 */
+#mmd-container {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    /* 【修复】z-index 与 vrm-container 一致，防止 VRM 容器层级始终高于 MMD，
+     * 导致 MMD 画布透明窗口期（模型清理/重建期间）穿透显示 VRM 缓存内容。 */
+    z-index: 10;
+    pointer-events: none;
+    background: none;
+    opacity: 1;
+    overflow: hidden;
+    visibility: visible;
+    transition: var(--neko-model-opacity-transition), var(--neko-model-transform-transition);
+    /* GPU 合成层隔离 */
+    will-change: transform;
+    transform: translateZ(0);
+    transform-origin: var(--neko-model-exit-origin-x, 50%) var(--neko-model-exit-origin-y, 50%);
+}
+
+#pngtuber-container {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 10;
+    pointer-events: none;
+    background: transparent !important;
+    overflow: hidden;
+    visibility: visible;
+    transition: var(--neko-model-opacity-transition), var(--neko-model-transform-transition);
+    will-change: transform;
+    transform: translateZ(0);
+    transform-origin: var(--neko-model-exit-origin-x, 50%) var(--neko-model-exit-origin-y, 50%);
+}
+
+#pngtuber-container.minimized {
+    transform: scale(0.38) translateZ(0);
+    opacity: 0;
+}
+
+#pngtuber-container .pngtuber-image {
+    position: absolute;
+    left: calc(100% - 48px);
+    top: calc(100% - 18px);
+    right: auto;
+    bottom: auto;
+    max-width: min(56vw, 560px);
+    max-height: 82vh;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    pointer-events: auto;
+    user-select: none;
+    touch-action: none;
+    cursor: grab;
+    transform-origin: right bottom;
+}
+
+#pngtuber-container .pngtuber-image.is-dragging {
+    cursor: grabbing;
+}
+
+/* 看板娘VR/MMD模型判定框-最小化状态 */
+#vrm-container.minimized,
+#mmd-container.minimized {
+    transform: scale(0.38) translateZ(0);
+    opacity: 0;
+}
+
+/* 游戏路由激活期间隐藏 pet 透明窗口上一切可见的可交互 UI，让 mini-game
+   进行时整张 pet 页面既不挡屏也不挡鼠标——只有这样 Electron preload 的
+   elementFromPoint 轮询才会拿到空命中，setIgnoreMouseEvents 把窗口翻成
+   穿透态，鼠标真正落到底下的 mini-game 窗口或桌面。
+   chat.html 收缩 + pet 隐藏由后端 game_window_state_change WS 事件统一
+   驱动，game_route_end 时同步还原（class 由 templates/index.html 内联
+   监听器在 closed 时移除）。
+   覆盖范围分两类：
+     1) 静态容器：avatar 三家（live2d/vrm/mmd）+ chat 主面板 + 字幕条 +
+        React chat 浮窗 + avatar preview 弹窗 + status toast。
+        #sidebar 自带 inline display:none 不需要再列。
+     2) 动态浮动 UI：avatar-ui-buttons parts 用 `{prefix}-floating-buttons` /
+        `{prefix}-return-button-container` / `{prefix}-lock-icon` 三组 ID
+        命名约定（live2d / vrm / mmd 各一份）注入到 body，靠属性后缀
+        匹配统一收掉，避免漏一个 prefix 留个浮动按钮挡鼠标。 */
+#live2d-floating-buttons,
+#vrm-floating-buttons,
+#mmd-floating-buttons,
+#pngtuber-floating-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+body.neko-live2d-peek #live2d-floating-buttons,
+body.neko-live2d-peek #live2d-lock-icon {
+    display: none !important;
+    pointer-events: none !important;
+}
+
+body.neko-game-active #live2d-container,
+body.neko-game-active #vrm-container,
+body.neko-game-active #mmd-container,
+body.neko-game-active #pngtuber-container,
+body.neko-game-active #chat-container,
+body.neko-game-active #status-toast,
+body.neko-game-active #subtitle-display,
+body.neko-game-active #react-chat-window-overlay,
+body.neko-game-active #chat-avatar-preview-popup,
+body.neko-game-active .home-avatar-floating-guide-player,
+body.neko-game-active [id$="-floating-buttons"],
+body.neko-game-active [id$="-return-button-container"],
+body.neko-game-active [id$="-lock-icon"] {
+    display: none !important;
+    pointer-events: none !important;
+}
+
+/* 锁图标的 pointer-events 兜底。
+   整页以 html,body{pointer-events:none} 作点击穿透底，锁图标本应自行 opt-in auto。
+   锁创建时（avatar-ui-buttons / live2d-ui-buttons 等）设的是 inline pointer-events:auto，
+   但 showLive2d / restoreYuiGuideLive2DPreparingControls 等「恢复」函数会对它
+   removeProperty('pointer-events') 来清掉 !important 残留，连带把那份 auto 也抹掉，
+   于是锁掉回继承的 none、永久点不动（直到一次 goodbye→return 重新设上 auto）。
+   这条兜底把锁的静止态钉成可点；拖拽屏蔽（body.neko-model-dragging …!important）、
+   游戏态隐藏、教程 preparing 隐藏（均用 !important none）仍能正常压住它。 */
+[id$="-lock-icon"] {
+    pointer-events: auto;
+}
+
+/* Goodbye 后的 return 入口 Phase 2 改为 CAT1 占位表现，但继续复用原有
+   DOM/ID/事件协议与拖拽逻辑。 */
+.neko-idle-return-button-container {
+    pointer-events: auto;
+    touch-action: none;
+}
+
+.neko-idle-return-button-container.is-cat1-on-compact-top-edge {
+    z-index: 100050 !important; /* 高于 dialog(100000) 和 tooltip(100030)，避免使用最大整数层级。 */
+    isolation: isolate; /* 主动创建独立层叠上下文，避免子元素层级泄出。 */
+}
+
+.neko-idle-return-button-container.is-cat1-on-compact-top-edge > .neko-idle-return-btn {
+    z-index: 100050 !important;
+}
+
+.neko-idle-return-button-container.is-cat1-dropping-from-compact-top-edge > .neko-idle-return-btn {
+    animation: nekoIdleCat1CompactDrop 360ms cubic-bezier(0.22, 0.72, 0.2, 1) both;
+}
+
+.neko-idle-return-button-container.is-cat1-desktop-window-top-edge-dropping > .neko-idle-return-btn {
+    animation: nekoIdleCat1DesktopWindowTopEdgeDrop 360ms cubic-bezier(0.22, 0.72, 0.2, 1) both;
+}
+
+.neko-idle-return-button-container.is-cat1-desktop-window-edge-peeking {
+    pointer-events: none;
+}
+
+.neko-idle-return-button-container.is-cat1-desktop-window-edge-peeking > .neko-idle-return-btn {
+    pointer-events: auto;
+}
+
+.neko-idle-return-btn.is-cat1-desktop-window-edge-peek-left {
+    --neko-desktop-window-edge-peek-clip: polygon(-100% -100%, 50% -100%, 50% 200%, -100% 200%);
+    --neko-desktop-window-edge-peek-cycle-clip: polygon(-100% -100%, 58% -100%, 58% 200%, -100% 200%);
+    --neko-desktop-window-edge-peek-cycle-shift: translate3d(-8%, 0, 0);
+    clip-path: var(--neko-desktop-window-edge-peek-clip);
+}
+
+.neko-idle-return-btn.is-cat1-desktop-window-edge-peek-right {
+    --neko-desktop-window-edge-peek-clip: polygon(50% -100%, 200% -100%, 200% 200%, 50% 200%);
+    --neko-desktop-window-edge-peek-cycle-clip: polygon(42% -100%, 200% -100%, 200% 200%, 42% 200%);
+    --neko-desktop-window-edge-peek-cycle-shift: translate3d(8%, 0, 0);
+    clip-path: var(--neko-desktop-window-edge-peek-clip);
+}
+
+.neko-idle-return-btn.is-cat1-desktop-window-edge-peek-bottom {
+    --neko-desktop-window-edge-peek-clip: polygon(-100% 56%, 200% 56%, 200% 200%, -100% 200%);
+    --neko-desktop-window-edge-peek-cycle-clip: polygon(-100% 48%, 200% 48%, 200% 200%, -100% 200%);
+    --neko-desktop-window-edge-peek-cycle-shift: translate3d(0, 8%, 0);
+    clip-path: var(--neko-desktop-window-edge-peek-clip);
+}
+
+.neko-idle-return-btn.is-cat1-desktop-window-edge-peek-left > .neko-idle-return-art {
+    --neko-idle-return-edge-transform: rotate(-60deg);
+}
+
+.neko-idle-return-btn.is-cat1-desktop-window-edge-peek-right > .neko-idle-return-art {
+    --neko-idle-return-edge-transform: rotate(60deg);
+}
+
+.neko-idle-return-btn.is-cat1-desktop-window-edge-peek-bottom > .neko-idle-return-art {
+    --neko-idle-return-edge-transform: rotate(180deg);
+}
+
+.neko-idle-return-button-container.is-cat1-desktop-window-edge-peek-cycle-active > .neko-idle-return-btn {
+    animation: nekoIdleCat1DesktopWindowEdgePeekCycle
+        var(--neko-desktop-window-edge-peek-cycle-duration, 850ms)
+        cubic-bezier(0.45, 0, 0.25, 1) both;
+}
+
+.neko-idle-return-btn.is-cat1-desktop-window-edge-peek-facing-right > .neko-idle-return-art {
+    --neko-idle-return-facing-transform: scaleX(-1);
+}
+
+.neko-idle-return-btn.is-cat1-facing-right.is-cat1-desktop-window-edge-peek-walking:not(.is-cat1-desktop-window-edge-peek-facing-right) > .neko-idle-return-art {
+    --neko-idle-return-facing-transform: scaleX(1);
+}
+
+.neko-idle-return-button-container.is-cat1-desktop-window-edge-peek-leaving > .neko-idle-return-btn {
+    animation: nekoIdleCat1DesktopWindowEdgePeekLeave 360ms cubic-bezier(0.22, 0.72, 0.2, 1) both;
+}
+
+.neko-idle-return-button-container.is-cat1-desktop-window-edge-peek-cue-active::after {
+    content: "";
+    position: absolute;
+    width: 18px;
+    height: 3px;
+    border-radius: 999px;
+    background: rgba(255, 190, 86, 0.95);
+    box-shadow:
+        5px 8px 0 rgba(255, 190, 86, 0.82),
+        -1px 16px 0 rgba(255, 190, 86, 0.68);
+    filter: drop-shadow(0 1px 1px rgba(73, 43, 18, 0.28));
+    pointer-events: none;
+    z-index: 4;
+    animation: nekoIdleCat1DesktopWindowEdgePeekCue 700ms ease-out both;
+}
+
+.neko-idle-return-btn.is-cat1-desktop-window-door-clipped {
+    clip-path: var(--neko-desktop-window-door-clip, inset(0));
+}
+
+.neko-desktop-window-door-layer {
+    display: contents;
+    pointer-events: none;
+}
+
+.neko-desktop-window-door-opening,
+.neko-desktop-window-door-frame {
+    position: fixed;
+    pointer-events: none;
+}
+
+.neko-desktop-window-door-opening {
+    z-index: 99998;
+    background: radial-gradient(ellipse at center, rgba(72, 61, 102, 0.9), rgba(17, 15, 25, 0.98));
+}
+
+.neko-desktop-window-door-frame {
+    z-index: 100000;
+    box-sizing: border-box;
+    border: 4px solid rgba(237, 204, 139, 0.98);
+    box-shadow:
+        inset 0 0 0 2px rgba(102, 65, 54, 0.82),
+        0 0 0 1px rgba(57, 38, 44, 0.8),
+        0 5px 5px rgba(24, 19, 33, 0.35);
+}
+
+.neko-desktop-window-door.is-left .neko-desktop-window-door-frame {
+    border-left-width: 7px;
+    border-right-width: 2px;
+    border-radius: 12px 3px 3px 12px;
+}
+
+.neko-desktop-window-door.is-right .neko-desktop-window-door-frame {
+    border-left-width: 2px;
+    border-right-width: 7px;
+    border-radius: 3px 12px 12px 3px;
+}
+
+.neko-desktop-window-door.is-top .neko-desktop-window-door-frame {
+    border-top-width: 7px;
+    border-bottom-width: 2px;
+    border-radius: 12px 12px 3px 3px;
+}
+
+.neko-desktop-window-door.is-bottom .neko-desktop-window-door-frame {
+    border-top-width: 2px;
+    border-bottom-width: 7px;
+    border-radius: 3px 3px 12px 12px;
+}
+
+.neko-idle-return-button-container.is-cat1-desktop-window-edge-peek-left::after {
+    left: -8px;
+    top: 20%;
+    transform: rotate(-18deg);
+}
+
+.neko-idle-return-button-container.is-cat1-desktop-window-edge-peek-right::after {
+    right: -8px;
+    top: 20%;
+    transform: rotate(198deg);
+}
+
+.neko-idle-return-button-container.is-cat1-desktop-window-edge-peek-bottom::after {
+    left: 52%;
+    bottom: -4px;
+    transform: rotate(90deg);
+}
+
+.neko-idle-return-button-container.is-cat1-compact-mirror-active {
+    pointer-events: none;
+}
+
+.neko-idle-return-button-container.is-cat1-compact-mirror-active > .neko-idle-return-btn {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.neko-idle-cat1-compact-mirror {
+    position: fixed;
+    z-index: 100050;
+    pointer-events: none;
+    overflow: visible;
+    isolation: isolate;
+}
+
+.neko-idle-cat1-compact-mirror[hidden] {
+    display: none !important;
+}
+
+.neko-idle-cat1-compact-mirror-art {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: contain;
+    object-position: center;
+}
+
+.neko-idle-cat1-compact-mirror[data-neko-cat1-wide-art="true"] .neko-idle-cat1-compact-mirror-art {
+    width: 175%;
+    min-width: 175%;
+    max-width: none;
+    height: 100%;
+}
+
+.neko-idle-return-btn {
+    --neko-idle-return-size: clamp(96px, 14vw, 122px);
+    position: relative;
+    width: var(--neko-idle-return-size);
+    height: var(--neko-idle-return-size);
+    overflow: visible;
+    isolation: isolate;
+}
+
+.neko-idle-return-art {
+    --neko-idle-return-facing-transform: scaleX(1);
+    --neko-idle-return-edge-transform: rotate(0deg);
+    --neko-idle-return-edge-visual-shift-y: 0px;
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: contain;
+    object-position: center;
+    position: relative;
+    top: var(--neko-idle-return-edge-visual-shift-y);
+    z-index: 1;
+    will-change: opacity, transform, filter;
+    transform: var(--neko-idle-return-facing-transform) var(--neko-idle-return-edge-transform);
+    transform-origin: center center;
+}
+
+.neko-idle-return-button-container[data-neko-goodbye-idle-appearance="ball"] > .neko-idle-return-btn {
+    --neko-idle-return-size: clamp(56px, 8vw, 72px);
+    border-radius: 999px;
+    background: transparent;
+    box-shadow:
+        0 0 8px rgba(68, 183, 254, 0.6),
+        0 0 18px rgba(68, 183, 254, 0.18);
+    animation: nekoGoodbyeIdleBallBreathing 2000ms ease-in-out infinite;
+}
+
+.neko-idle-return-button-container[data-neko-goodbye-idle-appearance="ball"] > .neko-idle-return-btn::after {
+    content: "";
+    position: absolute;
+    inset: -28%;
+    border-radius: inherit;
+    background: radial-gradient(circle, rgba(68, 183, 254, 0.18) 0%, rgba(68, 183, 254, 0) 70%);
+    pointer-events: none;
+    z-index: -1;
+}
+
+.neko-idle-return-button-container[data-neko-goodbye-idle-appearance="ball"] .neko-idle-return-art {
+    display: block !important;
+    width: 100% !important;
+    min-width: 100%;
+    max-width: 100%;
+    height: 100% !important;
+    top: 0;
+    object-fit: contain;
+    transform: none !important;
+    filter: drop-shadow(0 0 6px rgba(68, 183, 254, 0.28));
+}
+
+.neko-idle-return-button-container[data-neko-goodbye-idle-appearance="ball"] .neko-idle-return-art-next,
+.neko-idle-return-button-container[data-neko-goodbye-idle-appearance="ball"] span[class~="neko-idle-thought-bubble"] {
+    display: none !important;
+}
+
+@keyframes nekoGoodbyeIdleBallBreathing {
+    0%, 100% {
+        transform: scale(0.985);
+        box-shadow:
+            0 0 8px rgba(68, 183, 254, 0.6),
+            0 0 18px rgba(68, 183, 254, 0.18);
+    }
+    50% {
+        transform: scale(1.035);
+        box-shadow:
+            0 0 16px rgba(68, 183, 254, 1),
+            0 0 30px rgba(68, 183, 254, 0.28);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .neko-idle-return-button-container[data-neko-goodbye-idle-appearance="ball"] > .neko-idle-return-btn {
+        animation: none;
+    }
+}
+
+.neko-idle-return-btn.is-cat1-playing > .neko-idle-return-art,
+.neko-idle-return-art[data-neko-cat1-play-finishing="true"] {
+    width: 175% !important;
+    min-width: 175%;
+    max-width: none;
+    height: 100% !important;
+}
+
+#react-chat-window-shell.is-minimized[data-neko-cat1-play-hidden="true"] {
+    visibility: hidden !important;
+    pointer-events: none !important;
+}
+
+.neko-idle-return-btn[data-neko-idle-tier="cat2"] .neko-idle-return-art,
+.neko-idle-return-btn[data-neko-idle-tier="cat3"] .neko-idle-return-art {
+    transform-origin: center bottom;
+}
+
+.neko-idle-return-btn.is-cat1-facing-right > .neko-idle-return-art {
+    --neko-idle-return-facing-transform: scaleX(-1);
+}
+
+/*
+ * Settled desktop-window peeks own their edge composition. The generic walk
+ * facing class may legitimately remain on the button, but it must not mirror
+ * the already-rotated peek back into the sensed window.
+ */
+.neko-idle-return-btn.is-cat1-facing-right.is-cat1-desktop-window-edge-peek-left > .neko-idle-return-art,
+.neko-idle-return-btn.is-cat1-facing-right.is-cat1-desktop-window-edge-peek-right > .neko-idle-return-art,
+.neko-idle-return-btn.is-cat1-facing-right.is-cat1-desktop-window-edge-peek-bottom > .neko-idle-return-art {
+    --neko-idle-return-facing-transform: scaleX(1);
+}
+
+.neko-idle-return-btn.is-cat1-desktop-window-top-edge-active > .neko-idle-return-art {
+    --neko-idle-return-facing-transform: scaleX(1);
+}
+
+.neko-idle-return-btn.is-cat1-desktop-window-top-edge-active.is-cat1-desktop-window-top-edge-facing-right > .neko-idle-return-art {
+    --neko-idle-return-facing-transform: scaleX(-1);
+}
+
+/*
+ * 只校准 GNOME 原生 58px 毛球路径。左侧接近的终点已经在 JS 中前移 34px；
+ * 右侧的跨窗口视觉位置少 33px，因此待机和侧身素材都要补上这段距离。
+ * 待机规则使用独立站位侧，而不是会在动作完成后重置的 facingRight，避免误伤左侧待机。
+ */
+.neko-idle-return-btn[data-neko-cat1-native-yarn-visual-anchor="true"][data-neko-cat1-native-yarn-side="right"][data-neko-cat1-substate="idle"]:not(.is-cat1-playing):not(.is-cat1-eating):not(.is-cat1-stretching):not(.is-drag-action) > .neko-idle-return-art {
+    left: 33px;
+}
+
+.neko-idle-return-btn[data-neko-cat1-native-yarn-visual-anchor="true"].is-cat1-walking:not(.is-cat1-facing-right) > .neko-idle-return-art,
+.neko-idle-return-btn[data-neko-cat1-native-yarn-visual-anchor="true"].is-cat1-stretching:not(.is-cat1-facing-right) > .neko-idle-return-art {
+    left: calc(12.3046875% + 33px);
+}
+
+.neko-idle-return-btn[data-neko-cat1-native-yarn-visual-anchor="true"].is-cat1-walking.is-cat1-facing-right > .neko-idle-return-art,
+.neko-idle-return-btn[data-neko-cat1-native-yarn-visual-anchor="true"].is-cat1-stretching.is-cat1-facing-right > .neko-idle-return-art {
+    left: -17.96875%;
+}
+
+.neko-idle-return-btn.is-cat1-edge-peek-left > .neko-idle-return-art {
+    --neko-idle-return-edge-transform: rotate(60deg);
+}
+
+.neko-idle-return-btn.is-cat1-edge-peek-right > .neko-idle-return-art {
+    --neko-idle-return-edge-transform: rotate(-60deg);
+}
+
+.neko-idle-return-btn.is-cat1-edge-peek-top > .neko-idle-return-art {
+    --neko-idle-return-edge-transform: rotate(180deg);
+}
+
+.neko-idle-return-btn.is-cat1-edge-peek-bottom > .neko-idle-return-art {
+    --neko-idle-return-edge-transform: rotate(0deg);
+}
+
+.neko-idle-return-btn.is-cat1-edge-peek-top-left > .neko-idle-return-art {
+    --neko-idle-return-edge-transform: rotate(120deg);
+}
+
+.neko-idle-return-btn.is-cat1-edge-peek-top-right > .neko-idle-return-art {
+    --neko-idle-return-edge-transform: rotate(240deg);
+}
+
+.neko-idle-return-btn.is-cat1-edge-peek-bottom-left > .neko-idle-return-art {
+    --neko-idle-return-edge-transform: rotate(60deg);
+}
+
+.neko-idle-return-btn.is-cat1-edge-peek-bottom-right > .neko-idle-return-art {
+    --neko-idle-return-edge-transform: rotate(-60deg);
+}
+
+[data-neko-live2d-peek-anchor$="left"] .neko-idle-return-art {
+    --neko-idle-return-facing-transform: scaleX(-1);
+}
+
+[data-neko-live2d-peek-anchor$="right"] .neko-idle-return-art {
+    --neko-idle-return-facing-transform: scaleX(1);
+}
+
+[data-neko-live2d-peek-anchor] .neko-idle-return-art {
+    /* The transferred Live2D anchor controls placement only. Cat edge-peek
+       rotation is reserved for a drag performed after entering cat form. */
+    --neko-idle-return-edge-transform: rotate(0deg);
+}
+
+.neko-idle-thought-bubble {
+    --neko-idle-bubble-size: clamp(52px, 9vw, 78px);
+    position: absolute;
+    z-index: 3;
+    width: var(--neko-idle-bubble-size);
+    height: var(--neko-idle-bubble-size);
+    right: calc(var(--neko-idle-bubble-size) * -0.18);
+    top: calc(var(--neko-idle-bubble-size) * -0.45);
+    display: block;
+    transform: translate3d(0, 0, 0);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 360ms ease, visibility 0s linear 360ms;
+    pointer-events: none;
+    user-select: none;
+}
+
+.neko-idle-thought-bubble-bg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+    transform-origin: center center;
+    pointer-events: none;
+    user-select: none;
+}
+
+.neko-idle-thought-bubble-item {
+    position: absolute;
+    left: 50%;
+    top: 36%;
+    width: 47%;
+    max-height: 38%;
+    object-fit: contain;
+    display: block;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    user-select: none;
+}
+
+@keyframes neko-idle-thought-bubble-item-float {
+    0% { transform: translate(-50%, -50%); }
+    8.333% { transform: translate(-50%, calc(-50% - 0.5px)); }
+    16.667% { transform: translate(-50%, calc(-50% - 0.75px)); }
+    25% { transform: translate(-50%, calc(-50% - 1px)); }
+    33.333% { transform: translate(-50%, calc(-50% - 0.75px)); }
+    41.667% { transform: translate(-50%, calc(-50% - 0.5px)); }
+    50% { transform: translate(-50%, -50%); }
+    58.333% { transform: translate(-50%, calc(-50% + 0.5px)); }
+    66.667% { transform: translate(-50%, calc(-50% + 0.75px)); }
+    75% { transform: translate(-50%, calc(-50% + 1px)); }
+    83.333% { transform: translate(-50%, calc(-50% + 0.75px)); }
+    91.667% { transform: translate(-50%, calc(-50% + 0.5px)); }
+    100% { transform: translate(-50%, -50%); }
+}
+
+.neko-idle-return-btn.is-thought-bubble-active .neko-idle-thought-bubble {
+    opacity: 1;
+    visibility: visible;
+    transition-delay: 0s;
+    pointer-events: auto;
+    cursor: pointer;
+}
+
+.neko-idle-return-btn.is-thought-bubble-active .neko-idle-thought-bubble-item {
+    animation: neko-idle-thought-bubble-item-float 3600ms steps(24, end) infinite;
+}
+
+.neko-idle-return-btn.is-thought-bubble-popping .neko-idle-thought-bubble {
+    pointer-events: none;
+}
+
+.neko-idle-return-btn.is-thought-bubble-popping .neko-idle-thought-bubble-item {
+    display: none;
+}
+
+.neko-idle-return-btn.is-thought-bubble-sleeping .neko-idle-thought-bubble-item {
+    display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .neko-idle-return-btn.is-thought-bubble-active .neko-idle-thought-bubble-item {
+        animation: none;
+    }
+}
+
+.neko-idle-return-btn[data-neko-idle-tier="cat1"] .neko-idle-thought-bubble {
+    right: calc(var(--neko-idle-bubble-size) * -0.42);
+    top: calc(var(--neko-idle-bubble-size) * -0.72);
+}
+
+.neko-idle-return-btn[data-neko-idle-tier="none"] .neko-idle-thought-bubble,
+.neko-idle-return-btn.is-drag-action-pending .neko-idle-thought-bubble,
+.neko-idle-return-btn.is-drag-action .neko-idle-thought-bubble,
+.neko-idle-return-btn.is-cat1-walking .neko-idle-thought-bubble,
+.neko-idle-return-btn.is-cat1-desktop-window-top-edge-walking .neko-idle-thought-bubble,
+.neko-idle-return-btn.is-cat1-desktop-window-edge-peek-walking .neko-idle-thought-bubble,
+.neko-idle-return-button-container.is-cat1-desktop-window-edge-peeking .neko-idle-thought-bubble,
+.neko-idle-return-btn.is-cat1-stretching .neko-idle-thought-bubble,
+.neko-idle-return-btn.is-cat1-playing .neko-idle-thought-bubble,
+.neko-idle-return-btn.is-cat1-eating:not(.is-thought-bubble-popping) .neko-idle-thought-bubble,
+.neko-idle-return-btn.is-cat1-hover-paused .neko-idle-thought-bubble {
+    display: none;
+}
+
+.neko-idle-return-art-next {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    opacity: 0;
+    pointer-events: none;
+    transform-origin: center bottom;
+}
+
+.neko-idle-return-btn.is-tier-transitioning > .neko-idle-return-art:not(.neko-idle-return-art-next) {
+    animation: nekoIdleTierOut 820ms cubic-bezier(0.4, 0, 1, 1) both;
+}
+
+.neko-idle-return-btn.is-tier-transitioning > .neko-idle-return-art-next {
+    animation: nekoIdleTierIn 820ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes nekoIdleTierOut {
+    0% {
+        opacity: 1;
+        filter: blur(0);
+        transform: translate3d(0, 0, 0) scale(1) var(--neko-idle-return-facing-transform);
+    }
+    52% {
+        opacity: 0;
+        filter: blur(1px);
+        transform: translate3d(0, -4px, 0) scale(0.96) var(--neko-idle-return-facing-transform);
+    }
+    100% {
+        opacity: 0;
+        filter: blur(1px);
+        transform: translate3d(0, -4px, 0) scale(0.96) var(--neko-idle-return-facing-transform);
+    }
+}
+
+@keyframes nekoIdleTierIn {
+    0% {
+        opacity: 0;
+        filter: blur(1px);
+        transform: translate3d(0, 7px, 0) scale(0.94) var(--neko-idle-return-facing-transform);
+    }
+    28% {
+        opacity: 0;
+    }
+    100% {
+        opacity: 1;
+        filter: blur(0);
+        transform: translate3d(0, 0, 0) scale(1) var(--neko-idle-return-facing-transform);
+    }
+}
+
+@keyframes nekoIdleCat1CompactDrop {
+    0% {
+        transform: translate3d(0, clamp(-52px, -4vw, -34px), 0) rotate(0deg);
+    }
+    70% {
+        transform: translate3d(0, clamp(2px, 0.25vw, 4px), 0) rotate(-2deg);
+    }
+    100% {
+        transform: translate3d(0, 0, 0) rotate(0deg);
+    }
+}
+
+@keyframes nekoIdleCat1DesktopWindowTopEdgeDrop {
+    0% {
+        transform: translate3d(0, -52px, 0) rotate(0deg);
+    }
+    70% {
+        transform: translate3d(0, 3px, 0) rotate(-2deg);
+    }
+    100% {
+        transform: translate3d(0, 0, 0) rotate(0deg);
+    }
+}
+
+@keyframes nekoIdleCat1DesktopWindowEdgePeekLeave {
+    0% {
+        transform: translate3d(0, -52px, 0) rotate(0deg);
+    }
+    70% {
+        transform: translate3d(0, 3px, 0) rotate(2deg);
+    }
+    100% {
+        transform: translate3d(0, 0, 0) rotate(0deg);
+    }
+}
+
+@keyframes nekoIdleCat1DesktopWindowEdgePeekCue {
+    0% {
+        opacity: 0;
+    }
+    28% {
+        opacity: 1;
+    }
+    100% {
+        opacity: 0;
+    }
+}
+
+@keyframes nekoIdleCat1DesktopWindowEdgePeekCycle {
+    0%, 100% {
+        transform: translate3d(0, 0, 0);
+        clip-path: var(--neko-desktop-window-edge-peek-clip);
+    }
+    46% {
+        transform: var(--neko-desktop-window-edge-peek-cycle-shift);
+        clip-path: var(--neko-desktop-window-edge-peek-cycle-clip);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .neko-idle-return-btn.is-tier-transitioning > .neko-idle-return-art,
+    .neko-idle-return-btn.is-tier-transitioning > .neko-idle-return-art-next,
+    .neko-idle-return-button-container.is-cat1-dropping-from-compact-top-edge > .neko-idle-return-btn,
+    .neko-idle-return-button-container.is-cat1-desktop-window-top-edge-dropping > .neko-idle-return-btn,
+    .neko-idle-return-button-container.is-cat1-desktop-window-edge-peek-leaving > .neko-idle-return-btn,
+    .neko-idle-return-button-container.is-cat1-desktop-window-edge-peek-cue-active::after {
+        animation: none;
+    }
+
+    .neko-idle-return-button-container.is-cat1-desktop-window-edge-peek-cycle-active > .neko-idle-return-btn {
+        animation: none;
+    }
+}
+
+@media (max-width: 768px) {
+    .neko-idle-return-btn {
+        --neko-idle-return-size: clamp(88px, 24vw, 108px);
+    }
+}
+
+/* 看板娘VR模型画布样式 */
+#vrm-canvas {
+    right: 0;
+    bottom: 0;
+    pointer-events: auto;
+    display: block;
+    opacity: 1;
+    visibility: visible;
+    background: transparent;
+    width: 100%;
+    height: 100%;
+    /* GPU 合成层隔离 */
+    will-change: transform;
+    transform: translateZ(0);
+}
+
+/* 看板娘VR模型判定框-最小化状态时画布透明 */
+#vrm-canvas.minimized {
+    opacity: 0;
+    visibility: hidden;
+}
+
+/* 当 adapter 激活时，彻底隐藏旧聊天容器 */
+body.react-chat-adapter-active #chat-container {
+    display: none !important;
+    visibility: hidden !important;
+    pointer-events: none !important;
+    width: 0 !important;
+    height: 0 !important;
+    overflow: hidden !important;
+}
+
+/* 看板娘聊天框-容器 */
+#chat-container {
+    pointer-events: auto;
+    /* 恢复鼠标交互 */
+    position: fixed;
+    left: 20px;
+    bottom: 70px;
+    width: 400px;
+    max-height: 500px;
+    height: 500px;
+    /* 背景设为透明，backdrop-filter 移至 ::before 伪元素以避免合成器泄漏 */
+    background: transparent;
+    border-radius: 8px;
+    /* Fluent Design 标准圆角 */
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    /* 微妙的高光边框 */
+    padding: 0;
+    box-sizing: border-box;
+    overflow: hidden;
+    z-index: 20;
+    /* Fluent Design 多层阴影创造深度 */
+    box-shadow:
+        0 2px 4px rgba(0, 0, 0, 0.04),
+        0 8px 16px rgba(0, 0, 0, 0.08),
+        0 16px 32px rgba(0, 0, 0, 0.04);
+    scroll-behavior: smooth;
+    display: flex;
+    flex-direction: column;
+    transform-origin: left bottom;
+    transform: scale(1);
+    transition: width 0.3s ease, height 0.3s ease, max-height 0.3s ease, padding 0.3s ease, box-shadow 0.2s ease, transform 0.32s ease;
+}
+
+#chat-container.collapsing {
+    transform: scale(var(--chat-collapse-scale-x, 1), var(--chat-collapse-scale-y, 1));
+    transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+    will-change: transform;
+}
+
+/* 展开动画：从最小化尺寸过渡到完整尺寸 */
+#chat-container.expanding {
+    transform: scale(var(--chat-expand-scale-x, 1), var(--chat-expand-scale-y, 1));
+    transition: transform 0.32s cubic-bezier(0.2, 0, 0, 1);
+    will-change: transform;
+}
+
+#chat-container.expanding::before {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    transition: none !important;
+}
+
+/* 调整大小期间的性能优化 */
+#chat-container.is-resizing::before {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    transition: none !important;
+}
+
+#chat-container.is-resizing * {
+    transition: none !important;
+}
+
+/* Fluent Design Acrylic 材质层：将 backdrop-filter 隔离到伪元素上，
+   避免它与滚动子元素同层合成导致 Chromium 透明区域泄漏 */
+#chat-container::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(255, 255, 255, 0.65);
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    border-radius: inherit;
+    z-index: -1;
+    pointer-events: none;
+}
+
+/* 内部内容包裹器，负责滚动 - Fluent Design */
+#chat-content-wrapper {
+    pointer-events: auto;
+    flex-grow: 1;
+    padding: 16px;
+    padding-top: 48px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scroll-behavior: smooth;
+    overflow-anchor: auto;
+    transition: opacity 0.2s ease, visibility 0.2s ease;
+    opacity: 1;
+    visibility: visible;
+    background: rgba(249, 249, 249, 0.7);
+    /* Fluent Design 背景层 */
+    /* Firefox 滚动条 */
+    scrollbar-width: thin;
+    scrollbar-color: rgba(0, 0, 0, 0.15) rgba(249, 249, 249, 0.95);
+}
+
+#chat-content-wrapper:hover {
+    scrollbar-color: rgba(0, 0, 0, 0.25) rgba(249, 249, 249, 0.95);
+}
+
+/* 聊天内容滚动条 - 防止透明窗口中滚动条轨道穿透桌面 */
+#chat-content-wrapper::-webkit-scrollbar {
+    width: 6px;
+}
+
+#chat-content-wrapper::-webkit-scrollbar-track {
+    background: rgba(249, 249, 249, 0.95);
+}
+
+#chat-content-wrapper::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.15);
+    border-radius: 3px;
+}
+
+#chat-content-wrapper::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 0, 0, 0.25);
+}
+
+/* 滚动条角落 - 防止透明窗口中角落区域穿透桌面 */
+#chat-content-wrapper::-webkit-scrollbar-corner {
+    background: rgba(249, 249, 249, 0.95);
+}
+
+/* 切换按钮样式 - 更醒目的设计 */
+#toggle-chat-btn {
+    pointer-events: auto;
+    /* 恢复鼠标交互 */
+    position: absolute;
+    /* 绝对定位于容器内 */
+    top: 8px;
+    right: 8px;
+    left: auto;
+    width: 32px;
+    /* 按钮尺寸匹配图标 */
+    height: 32px;
+    /* 按钮尺寸匹配图标 */
+    background: transparent;
+    /* 透明背景，去掉深蓝色方框 */
+    opacity: 1;
+    border: none;
+    /* 去掉边框 */
+    border-radius: 0 !important;
+    /* 去掉圆角 */
+    cursor: grab;
+    /* 拖拽手势 */
+    font-weight: bold;
+    font-size: 14px;
+    /* 改为固定像素值，确保一致性 */
+    line-height: 32px;
+    /* 与按钮高度一致，确保垂直居中 */
+    text-align: center;
+    color: #fff;
+    z-index: 21;
+    /* 确保在内容之上 */
+    padding: 0;
+    user-select: none;
+    box-shadow: none;
+    /* 去掉阴影 */
+    transition: all 0.3s ease;
+}
+
+#toggle-chat-btn:hover {
+    transform: scale(1.1);
+}
+
+#toggle-chat-btn img {
+    width: 32px;
+    height: 32px;
+}
+
+/* 聊天框标题 - Fluent Design 风格 */
+#chat-header {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 48px;
+    background: #f7f8fa;
+    /* 不透明的标题栏背景 */
+    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+    /* Fluent Design 中性分隔线 */
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    box-sizing: border-box;
+    z-index: 21;
+    cursor: grab;
+    user-select: none;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+}
+
+/* 标题栏内的所有元素都不可选中 */
+#chat-header * {
+    user-select: none;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+}
+
+#chat-title {
+    font-size: 0.875rem;
+    /* Fluent Design 标准字号 14px */
+    font-weight: 600;
+    color: rgba(0, 0, 0, 0.9);
+    /* Fluent Design 高对比度文本 */
+    user-select: none;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+}
+
+#chat-content-actions {
+    position: sticky;
+    top: 12px;
+    z-index: 24;
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin: 0 0 12px;
+    pointer-events: none;
+}
+
+.chat-header-action-btn {
+    pointer-events: auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-width: 0;
+    max-width: min(34vw, 190px);
+    height: 32px;
+    padding: 0 10px;
+    border: 1px solid rgba(68, 183, 254, 0.32);
+    border-radius: 999px;
+    background: rgba(68, 183, 254, 0.08);
+    color: #2497d9;
+    cursor: pointer;
+    box-sizing: border-box;
+    transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease, transform 0.2s ease, opacity 0.2s ease;
+}
+
+.chat-header-action-btn[hidden] {
+    display: none !important;
+}
+
+.chat-header-action-btn:hover:not(:disabled) {
+    background: rgba(68, 183, 254, 0.14);
+    border-color: rgba(68, 183, 254, 0.5);
+    color: #127dbc;
+    transform: translateY(-1px);
+}
+
+.chat-header-action-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    transform: none;
+}
+
+.chat-header-action-btn:focus-visible {
+    outline: 2px solid rgba(68, 183, 254, 0.48);
+    outline-offset: 2px;
+}
+
+.chat-header-action-btn-avatar.is-loading {
+    cursor: progress;
+    opacity: 0.82;
+}
+
+.chat-header-action-btn-avatar.is-active {
+    background: rgba(68, 183, 254, 0.18);
+    border-color: rgba(68, 183, 254, 0.45);
+    color: #127dbc;
+}
+
+.chat-header-action-btn-react-window {
+    color: #3b6bdc;
+    border-color: rgba(59, 107, 220, 0.28);
+    background: rgba(59, 107, 220, 0.08);
+}
+
+.chat-header-action-btn-react-window:hover:not(:disabled) {
+    background: rgba(59, 107, 220, 0.14);
+    border-color: rgba(59, 107, 220, 0.45);
+    color: #2454c8;
+}
+
+.chat-header-action-icon {
+    width: 16px;
+    height: 16px;
+    flex: 0 0 auto;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.chat-header-btn-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.78rem;
+    font-weight: 600;
+    line-height: 1;
+}
+
+/* z-index 层级: 悬浮按钮 99999 < 对话框 100000 < 点歌台/管理器 100010 < 导出预览 100020 < tooltip 100030 */
+#react-chat-window-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 100000;
+    pointer-events: none;
+}
+
+#react-chat-window-overlay[hidden] {
+    display: none !important;
+}
+
+#react-chat-window-backdrop {
+    display: none;
+}
+
+#react-chat-window-shell {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    width: min(430px, calc(100vw - 22px));
+    height: min(860px, calc(100vh - 22px));
+    transform: translate(-50%, -50%);
+    display: block;
+    border-radius: 22px;
+    overflow: hidden;
+    background: transparent;
+    box-shadow: 0 30px 100px rgba(12, 20, 34, 0.3);
+    pointer-events: auto;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) {
+    width: min(430px, calc(100vw - 32px)) !important;
+    height: auto !important;
+    min-height: 0 !important;
+    top: auto !important;
+    bottom: 18px !important;
+    left: 50% !important;
+    transform: translateX(-50%) !important;
+    border-radius: 28px;
+    overflow: visible;
+    box-shadow: 0 24px 72px rgba(12, 20, 34, 0.18);
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"] #react-chat-window-root {
+    height: auto;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"] .react-chat-resize-edge {
+    display: none;
+}
+
+/* ---- 最小化：51px 毛线球悬浮窗 ---- */
+body.subtitle-web-host #react-chat-window-shell.is-minimized {
+    width: 51px !important;
+    height: 51px !important;
+    border-radius: 50%;
+    background: transparent;
+    box-shadow: none;
+    animation: none;
+    will-change: auto;
+    cursor: pointer;
+    overflow: visible;
+}
+
+body.subtitle-web-host #react-chat-window-shell.is-minimized.is-idle-docked:not(.is-dragging) {
+    transition: left 0.22s ease, top 0.22s ease;
+}
+
+body.subtitle-web-host #react-chat-window-shell.is-minimized #react-chat-window-root,
+body.subtitle-web-host #react-chat-window-shell.is-minimized #react-chat-window-header-actions {
+    display: none;
+}
+
+/* 拖拽手柄撑满圆形，充当点击恢复区域 */
+body.subtitle-web-host #react-chat-window-shell.is-minimized #react-chat-window-drag-handle {
+    width: 100%;
+    height: 100%;
+    cursor: pointer;
+}
+
+/* 最小化悬浮球内图标 */
+body.subtitle-web-host #react-chat-window-shell .react-chat-minimized-icon {
+    display: none;
+}
+
+body.subtitle-web-host #react-chat-window-shell.is-minimized .react-chat-minimized-icon {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    pointer-events: none;
+    image-rendering: auto !important;
+}
+
+/* 隐藏 resize 边缘 */
+body.subtitle-web-host #react-chat-window-shell.is-minimized .react-chat-resize-edge {
+    display: none;
+}
+
+/* ---- 折叠动画（向左下角缩放） ---- */
+body.subtitle-web-host #react-chat-window-shell.is-collapsing {
+    box-shadow: none !important;
+    transform-origin: 0% 100%;
+    transition:
+        transform 0.38s cubic-bezier(0.4, 0, 0.2, 1),
+        left 0.38s cubic-bezier(0.4, 0, 0.2, 1),
+        top 0.38s cubic-bezier(0.4, 0, 0.2, 1);
+    will-change: transform, left, top;
+}
+
+/* ---- 展开动画（从左下角放大） ---- */
+body.subtitle-web-host #react-chat-window-shell.is-expanding {
+    box-shadow: none !important;
+    transform-origin: 0% 100%;
+    transition:
+        transform 0.35s cubic-bezier(0.2, 0, 0, 1),
+        left 0.35s cubic-bezier(0.2, 0, 0, 1),
+        top 0.35s cubic-bezier(0.2, 0, 0, 1);
+    will-change: transform, left, top;
+}
+
+body.subtitle-web-host #react-chat-window-shell.is-dragging {
+    box-shadow: 0 36px 110px rgba(12, 20, 34, 0.36);
+}
+
+/* compact 输入框左侧毛绒球「按下挤压回弹」动画：使用 2x 预缩放纹理承载 squash/stretch，降低运行时采样锯齿。 */
+@keyframes neko-compact-minimize-press-frame {
+    from { background-position: 0 0; }
+    to { background-position: -1058px 0; }
+}
+@keyframes neko-compact-minimize-press-move {
+    0%   { transform: translateY(0); opacity: 1; }
+    30%  { transform: translateY(3px); opacity: 1; }
+    58%  { transform: translateY(-1px); opacity: 1; }
+    80%  { transform: translateY(0); opacity: 1; }
+    100% { transform: translateY(0); opacity: 1; }
+}
+.compact-chat-minimize-ball-icon.neko-minimize-ball-pressing {
+    transform-origin: center bottom;
+    animation: neko-compact-minimize-press-frame 420ms steps(23, end) both, neko-compact-minimize-press-move 420ms cubic-bezier(0.3, 0.8, 0.4, 1) both;
+}
+
+/* compact 对话条折叠/展开的「方向性渐变擦除」：折叠＝从右往左收（右先消失），展开＝反向从左往右展。
+   作用在 .compact-chat-surface-shell（position:fixed 的胶囊本体）上 —— 不能擦 #react-chat-window-root，
+   因为 fixed 子元素可能在 root 盒子外、mask 盖不到。用 mask 渐变 + 动 mask-position（gradient 本身
+   不可 tween，但 mask-position 可以）实现软边扫过。
+   安全：展开用 forwards 让保留态 = mask-position 0%（全可见），即使清理失败也不隐身；折叠类由宿主
+   setChatSurfaceMode 顶部无条件复位兜底（频繁点击也不会卡在「擦没了」）。 */
+@keyframes neko-compact-collapse-wipe {
+    from { -webkit-mask-position: 0% 0;   mask-position: 0% 0; }
+    to   { -webkit-mask-position: 100% 0; mask-position: 100% 0; }
+}
+@keyframes neko-compact-expand-wipe {
+    from { -webkit-mask-position: 100% 0; mask-position: 100% 0; }
+    to   { -webkit-mask-position: 0% 0;   mask-position: 0% 0; }
+}
+.compact-chat-surface-shell.neko-compact-collapsing,
+.compact-chat-surface-shell.neko-compact-expanding {
+    /* mask 300% 宽 + 渐变软边落在中间三分之一：mask-position 0% 时胶囊只看到纯黑（全可见），
+       100% 时只看到全透明（全隐），软边在 0%↔100% 之间从右向左/左向右扫过。 */
+    -webkit-mask-image: linear-gradient(to right, #000 33%, transparent 50%);
+    mask-image: linear-gradient(to right, #000 33%, transparent 50%);
+    -webkit-mask-size: 300% 100%; mask-size: 300% 100%;
+    -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+}
+.compact-chat-surface-shell.neko-compact-collapsing > .compact-chat-surface-frame,
+.compact-chat-surface-shell.neko-compact-expanding > .compact-chat-surface-frame {
+    /* Electron/Chromium 在 mask 动画首帧可能把 backdrop-filter 合成为矩形纹理；
+       仅在擦除期间强制胶囊裁剪，稳态移除 class 后外阴影仍可正常越界绘制。 */
+    -webkit-clip-path: inset(0 round 999px);
+    clip-path: inset(0 round 999px);
+}
+.compact-chat-surface-shell.neko-compact-collapsing {
+    animation: neko-compact-collapse-wipe 280ms ease forwards;
+}
+.compact-chat-surface-shell.neko-compact-expanding {
+    animation: neko-compact-expand-wipe 300ms ease forwards;
+}
+
+/* 减少动态效果偏好下，禁用毛绒球按压挤压与折叠/展开方向性擦除动画，给动画敏感用户
+   即时的折叠/展开（CodeRabbit 无障碍 nitpick）。仅影响开启该系统设置的用户。
+   必须放在上面动画规则之后：同特异性（两类选择器）下 CSS 后定义者胜，media query 不加
+   特异性，若放在文件靠前的 @media 块里会被这些动画规则覆盖、override 不生效（Codex P2）。 */
+@media (prefers-reduced-motion: reduce) {
+    .compact-chat-minimize-ball-icon.neko-minimize-ball-pressing {
+        animation: none;
+    }
+    .compact-chat-surface-shell.neko-compact-collapsing,
+    .compact-chat-surface-shell.neko-compact-expanding {
+        animation: none;
+    }
+}
+
+/* GalGame 模式：撑高聊天框最小高度，避免移动/桌面下选项被裁切 */
+body.galgame-mode-enabled #react-chat-window-shell:not(.is-minimized):not(.is-collapsing):not(.is-expanding) {
+    min-height: min(420px, calc(100vh - 22px));
+}
+
+@media (max-width: 768px) {
+    body.galgame-mode-enabled #react-chat-window-shell:not(.is-minimized):not(.is-collapsing):not(.is-expanding) {
+        min-height: min(380px, 80vh);
+    }
+}
+
+#react-chat-window-drag-handle {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 52px;
+    cursor: grab;
+    pointer-events: auto;
+    z-index: 3;
+}
+
+#react-chat-window-header-actions {
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    z-index: 4;
+    pointer-events: auto;
+}
+
+#reactChatWindowMinimizeButton,
+#reactChatWindowCloseButton {
+    width: 32px;
+    height: 32px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: #5f6c82;
+    font-size: 1.3rem;
+    line-height: 32px;
+    cursor: pointer;
+    pointer-events: auto;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+#reactChatWindowCloseButton {
+    width: 24px;
+    height: 24px;
+    font-size: 1rem;
+    line-height: 24px;
+    color: #9aa3b4;
+}
+
+#reactChatWindowMinimizeButton:hover,
+#reactChatWindowCloseButton:hover {
+    background: rgba(88, 108, 145, 0.12);
+    color: #2b3851;
+}
+
+#reactChatWindowMinimizeButton img {
+    width: 32px;
+    height: 32px;
+    object-fit: cover;
+    pointer-events: none;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-header-actions {
+    inset: 0 !important;
+    top: 0 !important;
+    right: 0 !important;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    pointer-events: none;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #avatarPreviewHeaderButton,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #exportConversationButton,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #reactChatWindowCloseButton {
+    display: none;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) {
+    min-height: 0 !important;
+    left: var(--compact-surface-left, 50%) !important;
+    top: var(--compact-surface-top, auto) !important;
+    bottom: auto !important;
+    width: var(--compact-surface-width, min(430px, calc(100vw - 32px))) !important;
+    margin-left: 0 !important;
+    transform: none !important;
+    border-radius: 0;
+    border: none !important;
+    overflow: visible;
+    background: transparent !important;
+    box-shadow: none !important;
+    filter: none !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding)::before,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding)::after {
+    content: none !important;
+    display: none !important;
+}
+
+body.subtitle-web-host.galgame-mode-enabled #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) {
+    min-height: 0 !important;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-drag-handle {
+    display: none;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized) #react-chat-window-root,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized) #react-chat-window-root .app-shell,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized) #react-chat-window-root .chat-window,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized) #react-chat-window-root .composer-panel,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized) #react-chat-window-root .composer,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized) #react-chat-window-root .compact-chat-surface-shell {
+    background: transparent !important;
+    box-shadow: none !important;
+    border: 0 !important;
+    outline: 0 !important;
+    filter: none !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+}
+
+body > .compact-chat-choice-anchor[data-chat-surface-mode="compact"] {
+    position: fixed;
+    left: calc(var(--compact-surface-left, 50vw) + (var(--compact-surface-width, 430px) / 2));
+    width: min(var(--compact-surface-width, 430px), 420px);
+    max-height: min(240px, calc(100vh - 96px));
+    height: max-content;
+    transform: translateX(-50%);
+    overflow-y: auto;
+    overflow-x: visible;
+    overscroll-behavior: contain;
+    scrollbar-width: none;
+    z-index: 100002;
+    pointer-events: none;
+}
+
+body > .compact-chat-choice-anchor[data-chat-surface-mode="compact"]::-webkit-scrollbar {
+    display: none;
+}
+
+body > .compact-chat-choice-anchor[data-chat-surface-mode="compact"] .composer-galgame-slot,
+body > .compact-chat-choice-anchor[data-chat-surface-mode="compact"] .composer-galgame-options {
+    pointer-events: none;
+}
+
+body > .compact-chat-choice-anchor[data-chat-surface-mode="compact"] .composer-galgame-option {
+    pointer-events: auto;
+}
+
+body > .compact-chat-choice-anchor[data-chat-surface-mode="compact"][data-choice-layer-open="false"] {
+    display: none;
+}
+
+body > .compact-chat-choice-anchor[data-chat-surface-mode="compact"][data-compact-choice-placement="above"] {
+    top: auto;
+    bottom: calc(100vh - var(--compact-surface-top, 0px) + 16px);
+}
+
+body > .compact-chat-choice-anchor[data-chat-surface-mode="compact"][data-compact-choice-placement="below"] {
+    top: calc(var(--compact-surface-top, 0px) + var(--compact-surface-height, 58px) + 16px);
+    bottom: auto;
+}
+
+body.electron-chat-window.subtitle-web-host > .compact-chat-choice-anchor[data-chat-surface-mode="compact"] {
+    max-height: 240px;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .chat-window,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .composer-panel,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .composer {
+    padding: 0 !important;
+    min-height: 0 !important;
+    width: 100% !important;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding),
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .chat-window,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .composer-panel,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .composer {
+    pointer-events: none;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) [data-compact-geometry-owner="surface"],
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) [data-compact-geometry-owner="surface"] *,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #reactChatWindowMinimizeButton,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #reactChatWindowMinimizeButton * {
+    pointer-events: auto;
+}
+
+/* 紧凑历史面板点击穿透契约：上方通用规则会重新开启 surface 子节点命中，
+   因此透明包装层必须回到 none，只保留气泡、控制区和预览可交互。 */
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #music-player-mount,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #music-player-mount * {
+    pointer-events: auto;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #music-player-mount.compact-music-player-mount[data-compact-music-player-visibility="closing"],
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #music-player-mount.compact-music-player-mount[data-compact-music-player-visibility="closing"] *,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #music-player-mount.compact-music-player-mount[data-compact-music-player-visibility="closed"],
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #music-player-mount.compact-music-player-mount[data-compact-music-player-visibility="closed"] * {
+    pointer-events: none;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) .compact-export-history-anchor,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) .compact-export-history-panel,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) .compact-export-history-scroll,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) .compact-export-history-scroll-content,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) .compact-export-history-message {
+    pointer-events: none;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) .compact-export-history-bubble,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) .compact-export-history-controls,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) .compact-export-preview-region {
+    pointer-events: auto;
+}
+
+/* 工具轮盘打开且历史操作/预览未打开时，历史记录退到工具轮盘下方，避免遮挡工具按钮。
+   但 scroll 区和气泡仍需保留命中：Electron 依赖这些 hit-region 收窄鼠标穿透区，否则滚轮事件进不了聊天窗口。 */
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"]:not([data-compact-export-controls-open="true"]):not([data-compact-export-preview-open="true"]) .compact-export-history-anchor {
+    z-index: 1 !important;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"]:not([data-compact-export-controls-open="true"]):not([data-compact-export-preview-open="true"]) .compact-export-history-anchor,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"]:not([data-compact-export-controls-open="true"]):not([data-compact-export-preview-open="true"]) .compact-export-history-panel,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"]:not([data-compact-export-controls-open="true"]):not([data-compact-export-preview-open="true"]) .compact-export-history-scroll-content,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"]:not([data-compact-export-controls-open="true"]):not([data-compact-export-preview-open="true"]) .compact-export-history-message {
+    pointer-events: none !important;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"]:not([data-compact-export-controls-open="true"]):not([data-compact-export-preview-open="true"]) .compact-export-history-scroll,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"]:not([data-compact-export-controls-open="true"]):not([data-compact-export-preview-open="true"]) .compact-export-history-bubble,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"]:not([data-compact-export-controls-open="true"]):not([data-compact-export-preview-open="true"]) .compact-export-history-resize-bar,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"]:not([data-compact-export-controls-open="true"]):not([data-compact-export-preview-open="true"]) .compact-export-history-scrollbar-hit {
+    pointer-events: auto !important;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"][data-compact-export-controls-open="true"] .compact-export-history-anchor:not(.under-choice-prompt),
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"][data-compact-export-preview-open="true"] .compact-export-history-anchor:not(.under-choice-prompt) {
+    z-index: 100006 !important;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"][data-compact-export-controls-open="true"] .compact-export-history-anchor,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"][data-compact-export-preview-open="true"] .compact-export-history-anchor,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"][data-compact-export-controls-open="true"] .compact-export-history-panel,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"][data-compact-export-preview-open="true"] .compact-export-history-panel,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"][data-compact-export-controls-open="true"] .compact-export-history-scroll,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"][data-compact-export-preview-open="true"] .compact-export-history-scroll,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"][data-compact-export-controls-open="true"] .compact-export-history-scroll-content,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"][data-compact-export-preview-open="true"] .compact-export-history-scroll-content,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"][data-compact-export-controls-open="true"] .compact-export-history-message,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"][data-compact-export-preview-open="true"] .compact-export-history-message {
+    pointer-events: none !important;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"][data-compact-export-controls-open="true"] .compact-export-history-bubble,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"][data-compact-export-preview-open="true"] .compact-export-history-bubble,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"][data-compact-export-controls-open="true"] .compact-export-history-controls,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"][data-compact-export-preview-open="true"] .compact-export-history-controls,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"][data-compact-export-controls-open="true"] .compact-export-preview-region,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"][data-compact-export-preview-open="true"] .compact-export-preview-region,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"][data-compact-export-controls-open="true"] .compact-export-history-resize-bar,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"][data-compact-export-preview-open="true"] .compact-export-history-resize-bar,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"][data-compact-export-controls-open="true"] .compact-export-history-scrollbar-hit,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"][data-compact-export-preview-open="true"] .compact-export-history-scrollbar-hit {
+    pointer-events: auto !important;
+}
+
+/* Keep choice prompts above dimmed history hit regions. */
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"] .compact-export-history-anchor.under-choice-prompt,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"] .compact-export-history-anchor.under-choice-prompt * {
+    pointer-events: none !important;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"] .compact-chat-surface-shell {
+    z-index: 100004 !important;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"] .compact-input-tool-fan,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell[data-compact-tool-layer-open="true"] .composer-icon-popover {
+    z-index: 100005 !important;
+}
+/* compact 态不再把最小化按钮渲染成模型旁的悬浮球：呼吸灯外发光会被 Electron 窗口形状裁切，
+   且球漂在角色旁观感很怪。最小化的宿主管线（按钮 DOM、toggleMinimized、折叠动画）保留，
+   compact 态下的最小化入口呈现方式后续单独设计。 */
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #reactChatWindowMinimizeButton {
+    display: none;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .compact-chat-surface-shell {
+    overflow: visible !important;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .compact-chat-surface-shell {
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .compact-chat-surface-shell .compact-input-tool-fan {
+    overflow: visible !important;
+    clip-path: none !important;
+    z-index: 100003 !important;
+}
+
+/* 轮盘容器本身是透明的；保留按钮和圆形旋转区的交互，其余区域（特别是与紧凑播放器
+   重叠的左上控制带）必须点击穿透。这里覆盖上面的宿主通用 pointer-events 规则。 */
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .compact-input-tool-fan[data-compact-input-tool-fan-open="true"] {
+    pointer-events: none !important;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .compact-input-tool-fan[data-compact-input-tool-fan-open="true"] .compact-input-tool-fan-hit-region,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .compact-input-tool-fan[data-compact-input-tool-fan-open="true"] .compact-input-tool-item:not([data-compact-tool-wheel-slot="hidden"]):not([data-compact-tool-wheel-slot="hidden-forward"]):not([data-compact-tool-wheel-slot="hidden-backward"]),
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .compact-input-tool-fan[data-compact-input-tool-fan-open="true"] .avatar-tool-quickbar,
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .compact-input-tool-fan[data-compact-input-tool-fan-open="true"] .avatar-tool-quickbar * {
+    pointer-events: auto !important;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .compact-input-tool-fan[data-compact-input-tool-fan-open="true"] .compact-input-tool-item[data-compact-tool-wheel-slot="hidden"],
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .compact-input-tool-fan[data-compact-input-tool-fan-open="true"] .compact-input-tool-item[data-compact-tool-wheel-slot="hidden-forward"],
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .compact-input-tool-fan[data-compact-input-tool-fan-open="true"] .compact-input-tool-item[data-compact-tool-wheel-slot="hidden-backward"] {
+    pointer-events: none !important;
+}
+
+body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root .app-shell:has(> #music-player-mount.compact-music-player-mount > .music-player-bar:not([hidden])) .compact-input-tool-fan[data-compact-input-tool-fan-open="true"] .compact-input-tool-fan-hit-region {
+    clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%, 0 var(--compact-tool-wheel-music-control-cutout-height), var(--compact-tool-wheel-music-control-cutout-width) var(--compact-tool-wheel-music-control-cutout-height), var(--compact-tool-wheel-music-control-cutout-width) 0);
+}
+
+#react-chat-window-root {
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    pointer-events: auto;
+}
+
+/* ===== React Chat Window Resize Edges ===== */
+.react-chat-resize-edge {
+    position: absolute;
+    z-index: 5;
+    pointer-events: auto;
+}
+
+.react-chat-resize-n {
+    top: -3px;
+    left: 8px;
+    right: 8px;
+    height: 6px;
+    cursor: n-resize;
+}
+
+.react-chat-resize-s {
+    bottom: -3px;
+    left: 8px;
+    right: 8px;
+    height: 6px;
+    cursor: s-resize;
+}
+
+.react-chat-resize-w {
+    top: 8px;
+    bottom: 8px;
+    left: -3px;
+    width: 6px;
+    cursor: w-resize;
+}
+
+.react-chat-resize-e {
+    top: 8px;
+    bottom: 8px;
+    right: -3px;
+    width: 6px;
+    cursor: e-resize;
+}
+
+.react-chat-resize-nw {
+    top: -3px;
+    left: -3px;
+    width: 12px;
+    height: 12px;
+    cursor: nw-resize;
+}
+
+.react-chat-resize-ne {
+    top: -3px;
+    right: -3px;
+    width: 12px;
+    height: 12px;
+    cursor: ne-resize;
+}
+
+.react-chat-resize-sw {
+    bottom: -3px;
+    left: -3px;
+    width: 12px;
+    height: 12px;
+    cursor: sw-resize;
+}
+
+.react-chat-resize-se {
+    bottom: -3px;
+    right: -3px;
+    width: 12px;
+    height: 12px;
+    cursor: se-resize;
+    /* 视觉指示器 */
+    background-image: linear-gradient(135deg,
+            transparent 0 35%, rgba(111, 129, 158, 0.3) 35% 43%,
+            transparent 43% 52%, rgba(111, 129, 158, 0.45) 52% 60%,
+            transparent 60% 70%, rgba(111, 129, 158, 0.6) 70% 78%,
+            transparent 78% 100%);
+    border-radius: 0 0 10px 0;
+}
+
+body.react-chat-window-resizing {
+    user-select: none;
+}
+
+/* ===== React Chat Window Dark Mode ===== */
+[data-theme="dark"] #react-chat-window-shell {
+    background: transparent;
+    box-shadow: 0 30px 100px rgba(0, 0, 0, 0.5);
+}
+
+[data-theme="dark"] #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) {
+    box-shadow: 0 24px 72px rgba(0, 0, 0, 0.42);
+}
+
+[data-theme="dark"] #react-chat-window-shell.is-dragging {
+    box-shadow: 0 36px 110px rgba(0, 0, 0, 0.6);
+}
+
+[data-theme="dark"] #react-chat-window-shell.is-minimized {
+    background: transparent;
+    box-shadow: none;
+}
+
+[data-theme="dark"] #avatarPreviewHeaderButton,
+[data-theme="dark"] #reactChatWindowMinimizeButton {
+    color: #aab0bc;
+}
+
+[data-theme="dark"] #reactChatWindowCloseButton {
+    color: #8a8f9c;
+}
+
+[data-theme="dark"] #avatarPreviewHeaderButton:hover,
+[data-theme="dark"] #reactChatWindowMinimizeButton:hover,
+[data-theme="dark"] #reactChatWindowCloseButton:hover {
+    background: rgba(200, 210, 230, 0.12);
+    color: #dde0e8;
+}
+
+[data-theme="dark"] body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #reactChatWindowMinimizeButton {
+    background-color: rgba(68, 183, 254, 0.16);
+    box-shadow: 0 0 10px rgba(68, 183, 254, 0.66);
+}
+
+[data-theme="dark"] body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) {
+    background: transparent !important;
+    box-shadow: none !important;
+    filter: none !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+}
+
+[data-theme="dark"] body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #reactChatWindowMinimizeButton:hover {
+    background-color: rgba(68, 183, 254, 0.22);
+    box-shadow: 0 0 14px rgba(68, 183, 254, 0.78);
+}
+
+[data-theme="dark"] #react-chat-window-root {
+    background: transparent;
+}
+
+[data-theme="dark"] .react-chat-resize-se {
+    background-image: linear-gradient(135deg,
+            transparent 0 35%, rgba(68, 183, 254, 0.35) 35% 43%,
+            transparent 43% 52%, rgba(68, 183, 254, 0.5) 52% 60%,
+            transparent 60% 70%, rgba(68, 183, 254, 0.7) 70% 78%,
+            transparent 78% 100%);
+}
+
+body.react-chat-window-open {
+    overflow: hidden;
+}
+
+body.react-chat-window-dragging {
+    user-select: none;
+    cursor: grabbing;
+}
+
+/* 对话区提示框 */
+#chat-tooltip {
+    position: absolute;
+    top: 60px;
+    left: 16px;
+    background: rgba(68, 183, 254, 0.95);
+    /* 与主色调一致 #44b7fe */
+    color: white;
+    padding: 12px 20px;
+    border-radius: 8px;
+    font-size: 0.95rem;
+    font-weight: 500;
+    box-shadow: 0 4px 12px rgba(68, 183, 254, 0.4);
+    z-index: 22;
+    pointer-events: none;
+    animation: slideInBounce 0.6s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+    transition: opacity 0.3s ease, transform 0.3s ease, visibility 0s linear 0.3s;
+}
+
+/* 聊天框提示框-隐藏状态 */
+#chat-tooltip.hidden {
+    opacity: 0;
+    transform: translateX(-20px);
+    visibility: hidden;
+    pointer-events: none;
+}
+
+/* 聊天框-提示框-三角形指示器 */
+#chat-tooltip::after {
+    content: '';
+    position: absolute;
+    top: -6px;
+    left: 20px;
+    width: 0;
+    height: 0;
+    border-left: 8px solid transparent;
+    border-right: 8px solid transparent;
+    border-bottom: 8px solid rgba(68, 183, 254, 0.95);
+}
+
+/* 聊天框-提示框-动画 */
+@keyframes slideInBounce {
+    0% {
+        opacity: 0;
+        transform: translateX(-30px) scale(0.8);
+    }
+
+    60% {
+        opacity: 1;
+        transform: translateX(5px) scale(1.05);
+    }
+
+    100% {
+        opacity: 1;
+        transform: translateX(0) scale(1);
+    }
+}
+
+/* 聊天消息样式  */
+#chatContainer {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.message {
+    padding: 10px 14px;
+    border-radius: 12px;
+    max-width: 80%;
+    overflow-wrap: break-word;
+    line-height: 1.5;
+    font-size: 0.95rem;
+    animation: fadeIn 0.3s ease;
+}
+
+.message.user {
+    align-self: flex-end;
+    background: #44b7fe;
+    /* 与按钮一致的浅蓝色 */
+    color: #fff;
+    margin-left: auto;
+    border-bottom-right-radius: 4px;
+}
+
+.message.gemini {
+    align-self: flex-start;
+    background: rgba(68, 183, 254, 0.12);
+    /* 与主色调协调的浅蓝背景 */
+    color: #333;
+    margin-right: auto;
+    border-bottom-left-radius: 4px;
+    white-space: pre-wrap;
+    /* 保留换行，配合 textContent 使用避免 XSS 风险 */
+}
+
+/* 聊天消息-动画-淡入 */
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* 文本输入区域样式 - Fluent Design */
+#text-input-area {
+    pointer-events: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+    background: rgba(255, 255, 255, 0.5);
+    /* Fluent Acrylic */
+    border-top: 1px solid rgba(0, 0, 0, 0.06);
+    /* 中性分隔线 */
+    box-sizing: border-box;
+    transition: all 0.3s ease;
+    position: relative;
+    z-index: 25;
+    user-select: none;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+}
+
+/* 文本输入区域内的所有元素（除了输入框）不可选中 */
+#text-input-area * {
+    user-select: none;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+}
+
+/* 语音模式下隐藏文本输入区 */
+#text-input-area.hidden {
+    display: none;
+}
+
+/* 独立头像预览弹窗（chat.html / index.html 共用）
+   作为一个浮动窗口定位在触发按钮附近。 */
+#chat-avatar-preview-popup {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 320px;
+    max-width: calc(100vw - 24px);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px;
+    border-radius: 16px;
+    border: 1px solid rgba(68, 183, 254, 0.22);
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(247, 250, 252, 0.96));
+    box-shadow:
+        0 20px 48px rgba(12, 20, 34, 0.24),
+        0 8px 22px rgba(33, 95, 144, 0.12),
+        inset 0 1px 0 rgba(255, 255, 255, 0.72);
+    z-index: 100010;
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+    transform-origin: top right;
+    transition: opacity 0.16s ease, transform 0.18s cubic-bezier(0.2, 0, 0, 1);
+    pointer-events: auto;
+}
+
+#chat-avatar-preview-popup.is-visible {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+}
+
+#chat-avatar-preview-popup[hidden] {
+    display: none !important;
+}
+
+[data-theme="dark"] #chat-avatar-preview-popup {
+    border-color: rgba(68, 183, 254, 0.28);
+    background:
+        linear-gradient(180deg, rgba(30, 38, 52, 0.96), rgba(22, 28, 40, 0.96));
+    box-shadow:
+        0 20px 48px rgba(0, 0, 0, 0.5),
+        0 8px 22px rgba(0, 0, 0, 0.28),
+        inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.chat-avatar-preview-card-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.chat-avatar-preview-card-title-group {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.chat-avatar-preview-card-title {
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: #215f90;
+    line-height: 1.2;
+}
+
+.chat-avatar-preview-card-status {
+    font-size: 0.76rem;
+    line-height: 1.45;
+    color: rgba(38, 75, 102, 0.78);
+}
+
+.chat-avatar-preview-card-close {
+    flex: 0 0 auto;
+    position: relative;
+    width: 28px;
+    height: 28px;
+    border-radius: 999px;
+    border: 1px solid rgba(68, 183, 254, 0.2);
+    background: rgba(68, 183, 254, 0.08);
+    color: #2497d9;
+    cursor: pointer;
+    font-size: 0;
+    line-height: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+.chat-avatar-preview-card-close::before,
+.chat-avatar-preview-card-close::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 12px;
+    height: 2px;
+    border-radius: 999px;
+    background: currentColor;
+    pointer-events: none;
+}
+
+.chat-avatar-preview-card-close::before {
+    transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.chat-avatar-preview-card-close::after {
+    transform: translate(-50%, -50%) rotate(-45deg);
+}
+
+.chat-avatar-preview-card-close:hover {
+    background: rgba(68, 183, 254, 0.14);
+    border-color: rgba(68, 183, 254, 0.34);
+    color: #127dbc;
+}
+
+.chat-avatar-preview-card-body {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+
+.chat-avatar-preview-image-shell {
+    position: relative;
+    width: 88px;
+    height: 88px;
+    border-radius: 24px;
+    overflow: hidden;
+    flex: 0 0 auto;
+    border: 1px solid rgba(68, 183, 254, 0.14);
+    background:
+        radial-gradient(circle at 30% 28%, rgba(255, 255, 255, 0.92), rgba(212, 237, 252, 0.86) 55%, rgba(180, 223, 248, 0.92));
+    box-shadow:
+        0 10px 24px rgba(33, 95, 144, 0.14),
+        inset 0 1px 0 rgba(255, 255, 255, 0.78);
+}
+
+.chat-avatar-preview-image-shell.is-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.chat-avatar-preview-image {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: cover;
+}
+
+.chat-avatar-preview-placeholder {
+    font-size: 0.78rem;
+    letter-spacing: 0.12em;
+    font-weight: 700;
+    color: rgba(33, 95, 144, 0.66);
+}
+
+.chat-avatar-preview-card-meta {
+    min-width: 0;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+}
+
+.chat-avatar-preview-card-note {
+    font-size: 0.78rem;
+    line-height: 1.55;
+    color: rgba(36, 62, 84, 0.82);
+}
+
+.chat-avatar-preview-refresh-btn {
+    pointer-events: auto;
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid rgba(68, 183, 254, 0.24);
+    background: rgba(68, 183, 254, 0.08);
+    color: #2497d9;
+    cursor: pointer;
+    font-size: 0.76rem;
+    font-weight: 600;
+    transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease, opacity 0.2s ease;
+}
+
+.chat-avatar-preview-refresh-btn:hover:not(:disabled) {
+    background: rgba(68, 183, 254, 0.14);
+    border-color: rgba(68, 183, 254, 0.38);
+    color: #127dbc;
+}
+
+.chat-avatar-preview-refresh-btn:disabled {
+    opacity: 0.55;
+    cursor: progress;
+}
+
+/* ──── Avatar Cropper (inline in popup) ──── */
+.chat-avatar-preview-crop-body {
+    display: none;
+    flex-direction: column;
+    gap: 10px;
+}
+#chat-avatar-preview-popup.is-cropping .chat-avatar-preview-card-body { display: none; }
+#chat-avatar-preview-popup.is-cropping .chat-avatar-preview-crop-body { display: flex; }
+#chat-avatar-preview-popup.is-cropping { width: auto; max-width: calc(100vw - 24px); }
+
+.avatar-cropper-canvas-wrap {
+    position: relative;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+    overflow: hidden;
+    border-radius: 8px;
+    background: #0a0a0a;
+    align-self: center;
+    flex-shrink: 0;
+}
+
+.avatar-cropper-source-img {
+    display: block;
+    pointer-events: none;
+}
+
+.avatar-cropper-mask {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+}
+
+.avatar-cropper-crop-box {
+    position: absolute;
+    cursor: move;
+    box-sizing: border-box;
+    border: 2px solid rgba(255, 255, 255, 0.85);
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.3);
+    overflow: visible;
+}
+
+.avatar-cropper-viewfinder {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    overflow: hidden;
+}
+
+.avatar-cropper-grid-line {
+    position: absolute;
+    background: rgba(255, 255, 255, 0.35);
+}
+.avatar-cropper-grid-line.h1 { top: 33.33%; left: 0; right: 0; height: 1px; }
+.avatar-cropper-grid-line.h2 { top: 66.66%; left: 0; right: 0; height: 1px; }
+.avatar-cropper-grid-line.v1 { left: 33.33%; top: 0; bottom: 0; width: 1px; }
+.avatar-cropper-grid-line.v2 { left: 66.66%; top: 0; bottom: 0; width: 1px; }
+
+.avatar-cropper-circle-guide {
+    position: absolute;
+    inset: 4%;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    pointer-events: none;
+}
+
+/* 手柄：完全定位在 crop-box 外侧角落 */
+.avatar-cropper-handle {
+    position: absolute;
+    width: 24px;
+    height: 24px;
+    z-index: 2;
+}
+.avatar-cropper-handle::before,
+.avatar-cropper-handle::after {
+    content: '';
+    position: absolute;
+    background: #fff;
+    box-shadow: 0 0 5px rgba(0, 0, 0, 0.7);
+    border-radius: 1px;
+}
+.avatar-cropper-handle.tl { top: -26px; left: -26px; cursor: nwse-resize; }
+.avatar-cropper-handle.tr { top: -26px; right: -26px; cursor: nesw-resize; }
+.avatar-cropper-handle.bl { bottom: -26px; left: -26px; cursor: nesw-resize; }
+.avatar-cropper-handle.br { bottom: -26px; right: -26px; cursor: nwse-resize; }
+
+.avatar-cropper-handle.tl::before { bottom: 0; right: 0; width: 20px; height: 5px; }
+.avatar-cropper-handle.tl::after  { bottom: 0; right: 0; width: 5px; height: 20px; }
+.avatar-cropper-handle.tr::before { bottom: 0; left: 0; width: 20px; height: 5px; }
+.avatar-cropper-handle.tr::after  { bottom: 0; left: 0; width: 5px; height: 20px; }
+.avatar-cropper-handle.bl::before { top: 0; right: 0; width: 20px; height: 5px; }
+.avatar-cropper-handle.bl::after  { top: 0; right: 0; width: 5px; height: 20px; }
+.avatar-cropper-handle.br::before { top: 0; left: 0; width: 20px; height: 5px; }
+.avatar-cropper-handle.br::after  { top: 0; left: 0; width: 5px; height: 20px; }
+
+/* 右侧控制面板 */
+.avatar-cropper-controls {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    align-self: center;
+    flex-shrink: 0;
+}
+.avatar-cropper-controls-row {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+}
+.avatar-cropper-ctrl-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.35);
+    color: rgba(255, 255, 255, 0.85);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+    padding: 0;
+}
+.avatar-cropper-ctrl-btn:hover {
+    background: rgba(68, 183, 254, 0.25);
+    border-color: rgba(68, 183, 254, 0.4);
+}
+.avatar-cropper-ctrl-btn:active {
+    background: rgba(68, 183, 254, 0.4);
+}
+.avatar-cropper-ctrl-btn svg {
+    width: 16px;
+    height: 16px;
+    fill: currentColor;
+}
+.avatar-cropper-ctrl-divider {
+    height: 6px;
+}
+
+.avatar-cropper-area {
+    display: flex;
+    gap: 10px;
+    align-items: stretch;
+}
+
+.avatar-cropper-buttons {
+    display: flex;
+    gap: 10px;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.avatar-cropper-decision-buttons {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    align-items: center;
+}
+
+.avatar-cropper-btn {
+    padding: 6px 14px;
+    border-radius: 999px;
+    border: 1px solid rgba(68, 183, 254, 0.24);
+    background: rgba(68, 183, 254, 0.08);
+    color: #215f90;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+.avatar-cropper-btn:hover {
+    background: rgba(68, 183, 254, 0.14);
+    border-color: rgba(68, 183, 254, 0.38);
+}
+.avatar-cropper-btn:disabled {
+    opacity: 0.55;
+    cursor: progress;
+}
+.avatar-cropper-btn.primary {
+    background: rgba(68, 183, 254, 0.22);
+    border-color: rgba(68, 183, 254, 0.4);
+    color: #127dbc;
+}
+.avatar-cropper-btn.primary:hover {
+    background: rgba(68, 183, 254, 0.32);
+}
+[data-theme="dark"] .avatar-cropper-btn {
+    color: #8fd4ff;
+    border-color: rgba(68, 183, 254, 0.22);
+    background: rgba(68, 183, 254, 0.06);
+}
+[data-theme="dark"] .avatar-cropper-btn:hover {
+    background: rgba(68, 183, 254, 0.14);
+}
+[data-theme="dark"] .avatar-cropper-btn.primary {
+    background: rgba(68, 183, 254, 0.18);
+    border-color: rgba(68, 183, 254, 0.38);
+}
+
+/* 旧的 .subtitle-prompt-message 注入式提示已下线：
+ * 字幕翻译开关现在常驻在 React 聊天窗口的 composer 工具栏，
+ * 由 frontend/react-neko-chat 渲染。 */
+
+
+/* 字幕样式已抽离到 /static/css/subtitle.css，避免主页面和独立字幕窗口重复维护。 */
+
+/* 截图缩略图容器 - 横向滚动布局 */
+#screenshot-thumbnail-container {
+    display: none;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    background: var(--neko-popup-accent-bg, rgba(68, 183, 254, 0.05));
+    border-radius: 8px;
+    border: 1px solid rgba(68, 183, 254, 0.2);
+    animation: slideDown 0.3s ease;
+}
+
+#screenshot-thumbnail-container.show {
+    display: flex;
+}
+
+@keyframes slideDown {
+    from {
+        opacity: 0;
+        transform: translateY(-10px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* 截图列表头部 */
+#screenshots-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 4px;
+}
+
+#screenshots-title {
+    font-size: 0.85rem;
+    color: #44b7fe;
+    font-weight: 600;
+}
+
+#screenshot-count-wrapper {
+    font-size: 0.85rem;
+    color: #44b7fe;
+    font-weight: 600;
+}
+
+#clear-all-screenshots {
+    padding: 2px 8px;
+    font-size: 0.75rem;
+    background: #dc3545;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+#clear-all-screenshots:hover {
+    background: #c82333;
+}
+
+/* 截图列表 - 横向滚动 */
+#screenshots-list {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 4px 0;
+    scrollbar-width: thin;
+    scrollbar-color: #ccc transparent;
+}
+
+#screenshots-list::-webkit-scrollbar {
+    height: 6px;
+}
+
+#screenshots-list::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+#screenshots-list::-webkit-scrollbar-thumb {
+    background: rgba(68, 183, 254, 0.4);
+    border-radius: 3px;
+}
+
+#screenshots-list::-webkit-scrollbar-thumb:hover {
+    background: rgba(68, 183, 254, 0.6);
+}
+
+/* 单个截图卡片 */
+.screenshot-item {
+    position: relative;
+    flex-shrink: 0;
+    width: 100px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    animation: screenshot-scale-in 0.3s ease;
+}
+
+@keyframes screenshot-scale-in {
+    from {
+        opacity: 0;
+        transform: scale(0.8);
+    }
+
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+@keyframes slideOut {
+    from {
+        opacity: 1;
+        transform: scale(1);
+    }
+
+    to {
+        opacity: 0;
+        transform: scale(0.8);
+    }
+}
+
+.screenshot-thumbnail {
+    width: 100px;
+    height: 75px;
+    object-fit: cover;
+    border-radius: 6px;
+    border: 2px solid #ddd;
+    background: white;
+    transition: border-color 0.2s, transform 0.2s;
+    cursor: pointer;
+}
+
+.screenshot-thumbnail:hover {
+    border-color: #44b7fe;
+    transform: scale(1.05);
+}
+
+.screenshot-remove {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: none;
+    background: #dc3545;
+    color: white;
+    font-size: 14px;
+    font-weight: bold;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s, transform 0.2s;
+    padding: 0;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.screenshot-remove:hover {
+    background: #c82333;
+    transform: scale(1.1);
+}
+
+.screenshot-index {
+    font-size: 0.7rem;
+    color: #44b7fe;
+    background: white;
+    padding: 2px 6px;
+    border-radius: 10px;
+    border: 1px solid rgba(68, 183, 254, 0.3);
+}
+
+/* ============ 截图裁切 overlay ============ */
+.crop-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 100040;
+    display: block;
+    background: #090b10;
+    pointer-events: auto;
+    animation: crop-fade-in 0.2s ease;
+}
+
+@keyframes crop-fade-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+}
+
+.crop-workspace {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+}
+
+/* Top bar with tabs */
+.crop-topbar {
+    position: absolute;
+    top: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    height: 48px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 10px;
+    background: rgba(8, 11, 18, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 999px;
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    z-index: 5;
+    user-select: none;
+}
+
+.crop-tab {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 999px;
+    font-size: 0.84rem;
+    font-weight: 500;
+    cursor: pointer;
+    color: rgba(255, 255, 255, 0.72);
+    background: transparent;
+    transition: background 0.15s, color 0.15s, transform 0.12s ease;
+}
+
+.crop-tab:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+    transform: translateY(-1px);
+}
+
+.crop-tab-active {
+    background: rgba(68, 183, 254, 0.18);
+    color: #8bd8ff;
+    box-shadow: inset 0 0 0 1px rgba(68, 183, 254, 0.34);
+}
+
+.crop-tab-active:hover {
+    background: rgba(68, 183, 254, 0.28);
+}
+
+.crop-tab-cancel {
+    margin-left: auto;
+    color: #ff6b7a;
+}
+
+.crop-tab-cancel:hover {
+    background: rgba(220, 53, 69, 0.2);
+    color: #ff8a97;
+}
+
+.crop-tab:disabled {
+    opacity: 0.5;
+    cursor: wait;
+}
+
+.crop-tab:focus-visible,
+.crop-action-btn:focus-visible {
+    outline: 2px solid rgba(68, 183, 254, 0.85);
+    outline-offset: 2px;
+}
+
+/* Background image + canvas positioned below topbar */
+.crop-bg-image {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    pointer-events: none;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.crop-canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    cursor: crosshair;
+    touch-action: none;
+    z-index: 1;
+}
+
+.crop-selection-box {
+    position: absolute;
+    z-index: 3;
+    border: 1px solid rgba(255, 255, 255, 0.92);
+    box-shadow:
+        0 0 0 1px rgba(68, 183, 254, 0.9),
+        inset 0 0 0 1px rgba(68, 183, 254, 0.25),
+        0 12px 30px rgba(0, 0, 0, 0.22);
+    pointer-events: none;
+}
+
+.crop-selection-grid-line {
+    position: absolute;
+    background: rgba(255, 255, 255, 0.38);
+}
+
+.crop-selection-grid-line.h1,
+.crop-selection-grid-line.h2 {
+    left: 0;
+    right: 0;
+    height: 1px;
+}
+
+.crop-selection-grid-line.v1,
+.crop-selection-grid-line.v2 {
+    top: 0;
+    bottom: 0;
+    width: 1px;
+}
+
+.crop-selection-grid-line.h1 { top: 33.333%; }
+.crop-selection-grid-line.h2 { top: 66.666%; }
+.crop-selection-grid-line.v1 { left: 33.333%; }
+.crop-selection-grid-line.v2 { left: 66.666%; }
+
+.crop-selection-handle {
+    position: absolute;
+    width: 10px;
+    height: 10px;
+    margin-left: -5px;
+    margin-top: -5px;
+    border-radius: 50%;
+    background: #fff;
+    border: 2px solid #44b7fe;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+
+.crop-selection-handle.nw { left: 0; top: 0; }
+.crop-selection-handle.n  { left: 50%; top: 0; }
+.crop-selection-handle.ne { left: 100%; top: 0; }
+.crop-selection-handle.e  { left: 100%; top: 50%; }
+.crop-selection-handle.se { left: 100%; top: 100%; }
+.crop-selection-handle.s  { left: 50%; top: 100%; }
+.crop-selection-handle.sw { left: 0; top: 100%; }
+.crop-selection-handle.w  { left: 0; top: 50%; }
+
+.crop-selection-badge,
+.crop-pointer-badge {
+    position: absolute;
+    z-index: 4;
+    min-width: 70px;
+    padding: 6px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    line-height: 1;
+    color: #fff;
+    background: rgba(8, 11, 18, 0.82);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.26);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    pointer-events: none;
+    white-space: nowrap;
+}
+
+.crop-crosshair {
+    position: absolute;
+    z-index: 2;
+    pointer-events: none;
+    background: rgba(255, 255, 255, 0.2);
+}
+
+.crop-crosshair-x {
+    left: 0;
+    right: 0;
+    height: 1px;
+}
+
+.crop-crosshair-y {
+    top: 0;
+    bottom: 0;
+    width: 1px;
+}
+
+/* Floating ✓ / × buttons near selection */
+.crop-action-btns {
+    position: absolute;
+    display: flex;
+    gap: 8px;
+    z-index: 6;
+    pointer-events: auto;
+    animation: crop-fade-in 0.15s ease;
+    padding: 6px;
+    border-radius: 999px;
+    background: rgba(8, 11, 18, 0.82);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.32);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+}
+
+.crop-action-btn {
+    width: 36px;
+    height: 36px;
+    border: none;
+    border-radius: 999px;
+    font-size: 1.1rem;
+    font-weight: 700;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, transform 0.1s;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.crop-action-confirm {
+    background: #44b7fe;
+    color: #fff;
+}
+
+.crop-action-confirm:hover {
+    background: #2fa8f5;
+    transform: scale(1.08);
+}
+
+.crop-action-cancel {
+    background: rgba(255, 255, 255, 0.12);
+    color: #ff6b7a;
+    border: 1px solid rgba(220, 53, 69, 0.4);
+}
+
+.crop-action-cancel:hover {
+    background: rgba(220, 53, 69, 0.25);
+    transform: scale(1.08);
+}
+
+/* Mobile adjustments */
+@media (max-width: 768px) {
+    .crop-topbar {
+        top: 14px;
+        height: 42px;
+        padding: 0 8px;
+        max-width: calc(100vw - 20px);
+    }
+
+    .crop-tab {
+        padding: 6px 10px;
+        font-size: 0.78rem;
+    }
+
+    .crop-action-btn {
+        width: 36px;
+        height: 36px;
+        font-size: 1.2rem;
+    }
+
+    .crop-selection-badge,
+    .crop-pointer-badge {
+        font-size: 11px;
+        padding: 5px 9px;
+    }
+}
+
+/* ===== 截图标注工具栏 ===== */
+.crop-toolbar {
+    position: absolute;
+    z-index: 6;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    box-sizing: border-box;
+    max-width: calc(100vw - 24px);
+    padding: 6px 8px;
+    border-radius: 12px;
+    background: rgba(8, 11, 18, 0.85);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.4);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    pointer-events: auto;
+    user-select: none;
+    animation: crop-fade-in 0.15s ease;
+}
+
+.crop-tool-group {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 2px;
+}
+
+.crop-tool-divider {
+    flex: 0 0 auto;
+    width: 1px;
+    align-self: stretch;
+    margin: 4px;
+    background: rgba(255, 255, 255, 0.14);
+}
+
+/* 按钮观感对齐 react 输入框的 .composer-tool-btn */
+.crop-tool-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: rgba(255, 255, 255, 0.82);
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.crop-tool-btn:hover {
+    background: rgba(68, 183, 254, 0.12);
+    color: #8bd8ff;
+}
+
+.crop-tool-btn.is-active {
+    background: rgba(68, 183, 254, 0.18);
+    color: #44b7fe;
+}
+
+.crop-tool-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.crop-tool-btn svg {
+    display: block;
+    pointer-events: none;
+}
+
+.crop-tool-btn:focus-visible,
+.crop-color-swatch:focus-visible,
+.crop-width-btn:focus-visible,
+.crop-opt-slider:focus-visible,
+.crop-opt-text:focus-visible {
+    outline: 2px solid rgba(68, 183, 254, 0.85);
+    outline-offset: 1px;
+}
+
+.crop-tool-confirm { color: #34c759; }
+.crop-tool-confirm:hover { background: rgba(52, 199, 89, 0.16); color: #4cd964; }
+.crop-tool-confirm.is-active { background: rgba(52, 199, 89, 0.16); color: #34c759; }
+
+.crop-tool-pin {
+    width: auto;
+    min-width: 48px;
+    padding: 0 10px;
+    color: #8bd8ff;
+    font-size: 13px;
+    white-space: nowrap;
+}
+
+.crop-tool-pin:hover {
+    background: rgba(68, 183, 254, 0.18);
+    color: #b9e9ff;
+}
+
+.crop-tool-cancel { color: #ff6b7a; }
+.crop-tool-cancel:hover { background: rgba(220, 53, 69, 0.18); color: #ff8a97; }
+
+/* 调色板 */
+.crop-color-swatch {
+    width: 18px;
+    height: 18px;
+    margin: 0 1px;
+    padding: 0;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.25);
+    cursor: pointer;
+    transition: transform 0.12s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.crop-color-swatch:hover { transform: scale(1.12); }
+
+.crop-color-swatch.is-active {
+    border-color: #fff;
+    box-shadow: 0 0 0 2px rgba(68, 183, 254, 0.7);
+}
+
+/* 线宽 S / M / L */
+.crop-width-btn {
+    min-width: 26px;
+    height: 28px;
+    padding: 0 6px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.crop-width-btn:hover { background: rgba(68, 183, 254, 0.12); color: #8bd8ff; }
+.crop-width-btn.is-active { background: rgba(68, 183, 254, 0.18); color: #44b7fe; }
+
+/* 文字工具的浮层 textarea */
+.crop-text-editor {
+    position: absolute;
+    z-index: 7;
+    margin: 0;
+    padding: 1px 2px;
+    min-width: 40px;
+    border: 1px dashed rgba(68, 183, 254, 0.9);
+    border-radius: 3px;
+    background: rgba(0, 0, 0, 0.18);
+    color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-weight: 600;
+    line-height: 1.28;
+    white-space: pre;
+    overflow: hidden;
+    outline: none;
+    resize: none;
+    pointer-events: auto;
+    caret-color: currentColor;
+}
+
+/* 上下文选项条：随当前工具浮在主工具栏旁，展示该工具的可调属性 */
+.crop-options-bar {
+    position: absolute;
+    z-index: 6;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 14px;
+    box-sizing: border-box;
+    max-width: calc(100vw - 24px);
+    padding: 8px 14px;
+    border-radius: 12px;
+    background: rgba(8, 11, 18, 0.85);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.4);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    pointer-events: auto;
+    user-select: none;
+    animation: crop-fade-in 0.15s ease;
+}
+
+.crop-opt-row {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.crop-opt-label {
+    color: rgba(255, 255, 255, 0.8);
+    font-size: 0.82rem;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.crop-opt-slider {
+    width: 120px;
+    height: 4px;
+    cursor: pointer;
+    accent-color: #44b7fe;
+}
+
+.crop-opt-value {
+    min-width: 26px;
+    color: #8bd8ff;
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+
+.crop-opt-text {
+    width: 140px;
+    height: 28px;
+    padding: 0 8px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.06);
+    color: #fff;
+    font-size: 0.85rem;
+    outline: none;
+}
+
+.crop-opt-text:focus {
+    border-color: rgba(68, 183, 254, 0.8);
+    background: rgba(68, 183, 254, 0.08);
+}
+
+/* 绘图工具激活时隐藏选区手柄与网格线，避免误触 */
+.crop-selection-box.crop-selection-box--drawing .crop-selection-handle,
+.crop-selection-box.crop-selection-box--drawing .crop-selection-grid-line {
+    display: none;
+}
+
+#text-input-row {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    /* 顶部对齐，确保上沿对齐 */
+    position: relative;
+    z-index: 1;
+}
+
+#textInputBox {
+    pointer-events: auto;
+    flex: 1;
+    padding: 10px;
+    border-radius: 8px;
+    border: 1px solid #ccc;
+    font-size: 0.9rem;
+    background: #fff;
+    color: #222;
+    resize: none;
+    /* 高度精确等于按钮组总高度，确保上沿和下沿对齐 */
+    height: 102px;
+    box-sizing: border-box;
+    cursor: text;
+    caret-color: #222;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+    font-weight: 400;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    /* 文本输入框需要能够选中文本 */
+    user-select: text !important;
+    -webkit-user-select: text !important;
+    -moz-user-select: text !important;
+    -ms-user-select: text !important;
+}
+
+#textInputBox:focus {
+    outline: none;
+    border-color: #44b7fe;
+    box-shadow: none;
+}
+
+#textInputBox:disabled {
+    background: #f5f5f5;
+    color: #999;
+    cursor: not-allowed;
+}
+
+#button-group {
+    display: flex;
+    flex-direction: row;
+    gap: 6px;
+}
+
+#textSendButton,
+#screenshotButton {
+    pointer-events: auto;
+    padding: 8px 16px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s;
+    font-size: 0.85rem;
+    font-weight: 500;
+    white-space: nowrap;
+    min-width: 80px;
+    display: flex;
+    align-items: center;
+    /* 图标和文字垂直居中对齐 */
+    justify-content: flex-start;
+    /* 内容左对齐，图标在左边 */
+    gap: 6px;
+    box-sizing: border-box;
+}
+
+/* 确保两个按钮的图标和文字对齐 */
+#textSendButton img,
+#screenshotButton img {
+    flex-shrink: 0;
+    /* 图标不收缩 */
+    width: 28px;
+    /* 统一图标宽度，确保对齐 */
+    height: 28px;
+    object-fit: contain;
+    pointer-events: none;
+}
+
+#textSendButton span,
+#screenshotButton span {
+    flex-shrink: 0;
+    /* 文字不收缩 */
+    text-align: left;
+    /* 文字左对齐 */
+}
+
+/* 发送按钮：蓝色背景 */
+#textSendButton {
+    border: 2px solid transparent;
+    background: #44b7fe;
+    color: #fff;
+}
+
+#textSendButton:hover:not(:disabled) {
+    background: #2ea0e0;
+}
+
+#textSendButton:disabled {
+    background: #b0c4de;
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+/* 截图按钮：白色背景 + 蓝色边框 */
+#screenshotButton {
+    border: 2px solid #44b7fe;
+    background: #fff;
+    color: #44b7fe;
+}
+
+#screenshotButton:hover:not(:disabled) {
+    background: #f0f9ff;
+    border-color: #2ea0e0;
+    border-width: 2px;
+}
+
+#screenshotButton:disabled {
+    border-color: #b0c4de;
+    border-width: 2px;
+    color: #b0c4de;
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+/* 桌面端和移动端文本显示控制 */
+.desktop-text {
+    display: inline;
+}
+
+.mobile-text {
+    display: none;
+}
+
+/* --- 最小化状态 --- */
+#chat-container.minimized::before {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: transparent;
+}
+
+#chat-container.minimized {
+    background: transparent;
+    box-shadow: none;
+    opacity: 1;
+    width: 51px !important;
+    height: 51px !important;
+    max-height: 51px !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    padding: 0;
+    cursor: pointer;
+    border-radius: 50%;
+    transition: none;
+    animation: none;
+    will-change: auto;
+    image-rendering: auto !important;
+}
+
+#chat-container.minimized #chat-header {
+    display: none;
+}
+
+#chat-container.minimized #chat-content-wrapper {
+    /* 隐藏内容区域 */
+    opacity: 0;
+    visibility: hidden;
+    height: 0;
+    /* 确保不占空间 */
+    padding: 0;
+    overflow: hidden;
+    /* 隐藏滚动条 */
+}
+
+#chat-container.minimized #text-input-area {
+    display: none;
+}
+
+#chat-container.minimized #chat-tooltip,
+#chat-container.minimized .music-player-bar {
+    display: none !important;
+}
+
+#chat-container.minimized #toggle-chat-btn {
+    /* 将按钮充满整个容器 */
+    top: 0;
+    right: 0;
+    left: auto;
+    bottom: 0;
+    width: 100%;
+    height: 100%;
+    transform: none;
+    background: transparent;
+    border-radius: 0;
+}
+
+#chat-container.minimized #toggle-chat-btn:hover {
+    transform: none;
+}
+
+/* 拖动中：禁用昂贵的视觉效果，使用 transform 走 GPU 合成 */
+#chat-container.dragging {
+    transition: none !important;
+    animation: none !important;
+    will-change: transform;
+    transform-origin: 0 0;
+}
+
+#chat-container.dragging::before {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    transition: none !important;
+}
+
+#chat-container.dragging #toggle-chat-btn {
+    transition: none !important;
+}
+
+#chat-container.dragging * {
+    animation: none !important;
+}
+
+#chat-container.minimized #toggle-chat-btn img {
+    width: 100% !important;
+    height: 100% !important;
+    object-fit: contain;
+    image-rendering: auto !important;
+}
+
+#input-row {
+    display: flex;
+    margin-top: 12px;
+}
+
+#userInput {
+    flex: 1;
+    padding: 8px;
+    border-radius: 6px;
+    border: 1px solid #ccc;
+    font-size: 1rem;
+    background: #fff;
+    color: #222;
+}
+
+#sendButton {
+    margin-left: 8px;
+    padding: 8px 16px;
+    border-radius: 6px;
+    border: none;
+    background: #44b7fe;
+    color: #fff;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+#sendButton:active {
+    background: #2ea0e0;
+}
+
+#sendButton:disabled {
+    background: #b0c4de;
+    cursor: not-allowed;
+    opacity: 0.7;
+}
+
+
+
+@media only screen and (max-width: 768px) {
+
+    /* 手机端背景设为黑色（Electron Pet 窗口除外：html/body 都带 lanlan-pet-mode；
+       Electron 紧凑聊天窗口 body.electron-chat-window 也排除，它要透明透出桌面） */
+    html:not(.lanlan-pet-mode),
+    body:not(.lanlan-pet-mode):not(.electron-chat-window) {
+        background: #000 !important;
+    }
+
+    :where(body:not(.lanlan-pet-mode)) #live2d-container {
+        position: fixed;
+        right: 0;
+        bottom: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 5;
+    }
+
+    :where(body:not(.lanlan-pet-mode)) #chat-container {
+        width: 90vw;
+        left: 5vw;
+        bottom: 10px;
+        max-height: 60vh;
+        height: 60vh;
+        padding: 0;
+        /* 禁用容器尺寸过渡，避免影响输入区 */
+        transition: none !important;
+        background: transparent;
+        box-shadow: none;
+    }
+
+    :where(body:not(.lanlan-pet-mode)) #chat-header {
+        height: 40px;
+        font-size: 0.9rem;
+    }
+
+    :where(body:not(.lanlan-pet-mode)) #chat-content-wrapper {
+        padding: 12px;
+        padding-top: 44px;
+        /* 禁用内容区过渡，避免折叠时对子元素产生影响 */
+        transition: none !important;
+        background: rgba(249, 249, 249, 0.5);
+        /* Fluent 背景层 */
+    }
+
+    :where(body:not(.lanlan-pet-mode)) #text-input-area {
+        padding: 8px;
+        /* 输入区不参与任何过渡动画 */
+        transition: none !important;
+        background: rgba(255, 255, 255, 0.4);
+        /* Fluent Acrylic */
+        border-top: 1px solid rgba(0, 0, 0, 0.06);
+        /* Fluent 分隔线 */
+    }
+
+    /* 输入区内部元素也不参与过渡，避免细微跳动 */
+    :where(body:not(.lanlan-pet-mode)) #text-input-row,
+    :where(body:not(.lanlan-pet-mode)) #textInputBox,
+    :where(body:not(.lanlan-pet-mode)) #button-group {
+        transition: none !important;
+    }
+
+    :where(body:not(.lanlan-pet-mode)) #textInputBox {
+        font-size: 0.9rem;
+        /* 移动端：按钮纵向排列，高度匹配按钮组总高度 */
+        height: 92px;
+    }
+
+    :where(body:not(.lanlan-pet-mode)) #button-group {
+        gap: 4px;
+    }
+
+    :where(body:not(.lanlan-pet-mode)) #textSendButton,
+    :where(body:not(.lanlan-pet-mode)) #screenshotButton {
+        padding: 6px 12px;
+        font-size: 0.8rem;
+        min-width: 70px;
+    }
+
+    :where(body:not(.lanlan-pet-mode)) .screenshot-item {
+        width: 80px;
+    }
+
+    :where(body:not(.lanlan-pet-mode)) .screenshot-thumbnail {
+        width: 80px;
+        height: 60px;
+    }
+
+    :where(body:not(.lanlan-pet-mode)) .chat-avatar-preview-card-body {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    :where(body:not(.lanlan-pet-mode)) .chat-avatar-preview-image-shell {
+        width: 78px;
+        height: 78px;
+        border-radius: 22px;
+    }
+
+    :where(body:not(.lanlan-pet-mode)) #screenshots-title {
+        font-size: 0.8rem;
+    }
+
+    :where(body:not(.lanlan-pet-mode)) #clear-all-screenshots {
+        font-size: 0.7rem;
+        padding: 2px 6px;
+    }
+
+    :where(body:not(.lanlan-pet-mode)) .screenshot-index {
+        font-size: 0.65rem;
+    }
+
+    :where(body:not(.lanlan-pet-mode)) .message {
+        font-size: 0.9rem;
+        max-width: 85%;
+    }
+
+    /* 移动端显示拍照，隐藏截图 */
+    :where(body:not(.lanlan-pet-mode)) .desktop-text {
+        display: none;
+    }
+
+    :where(body:not(.lanlan-pet-mode)) .mobile-text {
+        display: inline;
+    }
+}
+
+@media only screen and (max-width: 768px) {
+
+    /* 移动端：折叠时容器完全透明且不拦截触摸事件 */
+    :where(body:not(.lanlan-pet-mode)) #chat-container.mobile-collapsed {
+        width: 48px !important;
+        min-width: 48px !important;
+        max-width: 48px !important;
+        height: 48px;
+        min-height: 48px;
+        max-height: 48px;
+        overflow: hidden;
+        pointer-events: none !important;
+        background: transparent !important;
+        backdrop-filter: none !important;
+        -webkit-backdrop-filter: none !important;
+        box-shadow: none !important;
+        border: none !important;
+    }
+
+    :where(body:not(.lanlan-pet-mode)) #chat-container.mobile-collapsed::before {
+        backdrop-filter: none !important;
+        -webkit-backdrop-filter: none !important;
+        background: transparent !important;
+    }
+
+    /* 移动端：折叠时仅切换按钮可交互 */
+    :where(body:not(.lanlan-pet-mode)) #chat-container.mobile-collapsed #toggle-chat-btn {
+        pointer-events: auto !important;
+        left: 8px;
+        right: auto;
+        top: 8px;
+        transform: none;
+        position: relative;
+    }
+
+    /* 移动端：折叠时隐藏输入区和音乐调节条 */
+    :where(body:not(.lanlan-pet-mode)) #chat-container.mobile-collapsed #text-input-area,
+    :where(body:not(.lanlan-pet-mode)) #chat-container.mobile-collapsed .music-player-bar {
+        display: none !important;
+    }
+}
+
+@media only screen and (max-width: 768px) {
+
+    /* 移动端：最小化仅折叠内容区，输入区常驻显示 */
+    :where(body:not(.lanlan-pet-mode)) #chat-container.minimized #text-input-area {
+        display: block;
+    }
+
+    /* 移动端：最小化时保持容器尺寸，让输入区可见可用 */
+    :where(body:not(.lanlan-pet-mode)) #chat-container.minimized {
+        width: 90vw;
+        left: 5vw;
+        bottom: 5px;
+        height: auto;
+        max-height: none;
+        padding: 0;
+        cursor: default;
+        border-radius: 8px;
+        /* 移动端保持矩形圆角 */
+        animation: none;
+        /* 移动端不需要呼吸效果 */
+        background: transparent;
+    }
+
+    /* React chat window 移动端规则仅作用于 index.html 等真正的浏览器手机端。
+       chat.html 是 Electron 独立窗口（无论拖得多窄都应走 PC 逻辑），
+       在 <body> 加 .electron-chat-window 从此媒体查询中排除。 */
+    body:not(.electron-chat-window):where(:not(.lanlan-pet-mode)) #react-chat-window-shell:not(.is-minimized):not(.is-collapsing):not(.is-expanding) {
+        width: calc(100vw - 12px);
+        height: auto;
+        max-height: 85vh;
+        top: auto;
+        bottom: 6px;
+        left: 6px;
+        transform: none;
+        border-radius: 14px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+    }
+
+    body:not(.electron-chat-window):where(:not(.lanlan-pet-mode)) #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) {
+        width: var(--compact-surface-width, calc(100vw - 16px)) !important;
+        left: var(--compact-surface-left, 8px) !important;
+        right: auto;
+        bottom: 8px !important;
+        margin-left: 0 !important;
+        transform: none !important;
+        overflow: visible;
+    }
+
+    body:not(.electron-chat-window):where(:not(.lanlan-pet-mode)) #react-chat-window-shell #react-chat-window-root {
+        height: 100%;
+        flex: 1 1 auto;
+        overflow: hidden;
+        min-height: 0;
+    }
+
+    body:not(.electron-chat-window):where(:not(.lanlan-pet-mode)) #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) #react-chat-window-root,
+    body:not(.electron-chat-window):where(:not(.lanlan-pet-mode)) #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) .chat-window.chat-surface-mode-compact {
+        overflow: visible;
+    }
+
+    body:not(.electron-chat-window):where(:not(.lanlan-pet-mode)) #react-chat-window-shell .app-shell {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+    }
+
+    /* 窄屏与桌面统一用 grid 布局：auto(顶栏) 1fr(消息) auto(输入) +
+       overflow:hidden 保证输入区不会被消息挤出。shell 尺寸仍由
+       syncMobileContentLayout() 写成显式像素（根据内容，最高 85vh；
+       用户拖过顶部手柄后走 mobileUserHeight 持久化值）。 */
+    body:not(.electron-chat-window):where(:not(.lanlan-pet-mode)) #react-chat-window-shell .chat-window {
+        height: 100%;
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        min-height: 0;
+        overflow: hidden;
+    }
+
+    body:not(.electron-chat-window):where(:not(.lanlan-pet-mode)) #react-chat-window-shell .chat-body {
+        min-height: 0;
+        overflow: hidden;
+    }
+
+    body:not(.electron-chat-window):where(:not(.lanlan-pet-mode)) #react-chat-window-shell .message-list {
+        height: 100%;
+        min-height: 0;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    /* .is-mobile-content-capped 现在不再影响布局（message-list 始终可滚），
+       保留空规则以免其他位置若有依赖时出现样式回退。 */
+    body:not(.electron-chat-window):where(:not(.lanlan-pet-mode)) #react-chat-window-shell.is-mobile-content-capped .message-list {
+        overflow-y: auto;
+    }
+
+    /* Mobile: hide the divider between translate and jukebox plus the last tool button (jukebox)
+       to reduce clutter on small screens. If the tool order changes, replace these positional
+       selectors with a dedicated class or data attribute on the affected controls. */
+    body:not(.electron-chat-window):where(:not(.lanlan-pet-mode)) #react-chat-window-shell .composer-bottom-tools > .composer-tool-divider:nth-last-child(2),
+    body:not(.electron-chat-window):where(:not(.lanlan-pet-mode)) #react-chat-window-shell .composer-bottom-tools > .composer-tool-btn:last-child {
+        display: none;
+    }
+
+    body:not(.electron-chat-window):where(:not(.lanlan-pet-mode)) #react-chat-window-shell.is-mobile-expand-guarding .composer-tool-btn,
+    body:not(.electron-chat-window):where(:not(.lanlan-pet-mode)) #react-chat-window-shell.is-mobile-expand-guarding .composer-tool-btn:hover,
+    body:not(.electron-chat-window):where(:not(.lanlan-pet-mode)) #react-chat-window-shell.is-mobile-expand-guarding .composer-tool-btn:active,
+    body:not(.electron-chat-window):where(:not(.lanlan-pet-mode)) #react-chat-window-shell.is-mobile-expand-guarding .composer-tool-btn:focus {
+        background: transparent !important;
+        pointer-events: none;
+    }
+
+    body:not(.electron-chat-window):where(:not(.lanlan-pet-mode)) #react-chat-window-drag-handle {
+        cursor: grab;
+    }
+
+    /* 手机端：仅显示顶部拖拽边缘用于调整高度，隐藏其余方向 */
+    body:not(.electron-chat-window):where(:not(.lanlan-pet-mode)) #react-chat-window-shell:not(.is-minimized) .react-chat-resize-edge {
+        display: none;
+    }
+    body:not(.electron-chat-window):where(:not(.lanlan-pet-mode)) #react-chat-window-shell:not(.is-minimized) .react-chat-resize-n {
+        display: block;
+        height: 14px;
+        top: -4px;
+        left: 0;
+        right: 0;
+        cursor: n-resize;
+        /* 可视拖拽指示条 */
+        background: transparent;
+    }
+    body:not(.electron-chat-window):where(:not(.lanlan-pet-mode)) #react-chat-window-shell:not(.is-minimized) .react-chat-resize-n::after {
+        content: '';
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        width: 36px;
+        height: 4px;
+        border-radius: 2px;
+        background: rgba(150, 160, 175, 0.4);
+    }
+
+    /* ---- 手机端最小化：51px 毛线球（与桌面端一致）----
+       替代原先的全宽底部胶囊，使用圆形小球，可自由拖动 */
+    body:not(.electron-chat-window):where(:not(.lanlan-pet-mode)) #react-chat-window-shell.is-minimized {
+        width: 51px !important;
+        height: 51px !important;
+        border-radius: 50%;
+    }
+
+    body:not(.electron-chat-window):where(:not(.lanlan-pet-mode)) #react-chat-window-shell.is-minimized #react-chat-window-drag-handle {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+    }
+
+    body:not(.electron-chat-window):where(:not(.lanlan-pet-mode)) #react-chat-window-shell.is-minimized .react-chat-minimized-icon {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        pointer-events: none;
+        image-rendering: auto !important;
+    }
+
+    :where(body:not(.lanlan-pet-mode)) #chat-container.minimized::before {
+        backdrop-filter: none !important;
+        -webkit-backdrop-filter: none !important;
+        background: transparent !important;
+    }
+}
+
+body.yui-guide-compact-chat-fixed.subtitle-web-host:not(.neko-electron-runtime) #react-chat-window-shell[data-chat-surface-mode="compact"]:not(.is-minimized):not(.is-collapsing):not(.is-expanding) {
+    left: clamp(24px, 6vw, 72px) !important;
+    top: min(62vh, calc(100vh - var(--compact-surface-height, 58px) - 24px)) !important;
+    bottom: auto !important;
+    width: min(400px, calc(100vw - 32px)) !important;
+    transform: none !important;
+}
+
+body.yui-guide-compact-chat-fixed.subtitle-web-host:not(.neko-electron-runtime) > .compact-chat-choice-anchor[data-chat-surface-mode="compact"] {
+    left: calc(clamp(24px, 6vw, 72px) + 200px);
+}
+
+body.yui-guide-compact-chat-fixed.subtitle-web-host:not(.neko-electron-runtime) > .compact-chat-choice-anchor[data-chat-surface-mode="compact"][data-compact-choice-placement="above"] {
+    top: auto;
+    bottom: calc(100vh - min(62vh, calc(100vh - var(--compact-surface-height, 58px) - 24px)) + 16px);
+}
+
+body.yui-guide-compact-chat-fixed.subtitle-web-host:not(.neko-electron-runtime) > .compact-chat-choice-anchor[data-chat-surface-mode="compact"][data-compact-choice-placement="below"] {
+    top: calc(min(62vh, calc(100vh - var(--compact-surface-height, 58px) - 24px)) + var(--compact-surface-height, 58px) + 16px);
+    bottom: auto;
+}
+
+/* Agent HUD 空状态折叠按钮样式 */
+.collapse-button {
+    background: rgba(68, 183, 254, 0.12);
+    color: #94a3b8;
+}
+
+.collapse-button.collapsed {
+    background: rgba(0, 0, 0, 0.05);
+    color: #888;
+}
+
+.empty-state {
+    max-height: 800px;
+    transition: max-height 0.2s ease, opacity 0.2s ease, margin 0.2s ease, padding 0.2s ease;
+    overflow: hidden;
+}
+
+.empty-state.collapsed {
+    max-height: 0;
+    opacity: 0;
+    margin: 0;
+    padding: 0;
+    pointer-events: none;
+    visibility: hidden;
+}
+
+/* ============================================================ */
+/* Chat Export — header button + preview modal                  */
+/* ============================================================ */
+
+#avatarPreviewHeaderButton,
+#exportConversationButton {
+    width: 32px;
+    height: 32px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: #5f6c82;
+    cursor: pointer;
+    pointer-events: auto;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.18s ease, color 0.18s ease;
+}
+
+#avatarPreviewHeaderButton:hover,
+#exportConversationButton:hover {
+    background: rgba(88, 108, 145, 0.12);
+    color: #2b3851;
+}
+
+#avatarPreviewHeaderButton:focus-visible,
+#exportConversationButton:focus-visible {
+    outline: 2px solid rgba(88, 108, 145, 0.55);
+    outline-offset: 2px;
+}
+
+#avatarPreviewHeaderButton svg,
+#exportConversationButton svg {
+    pointer-events: none;
+    display: block;
+}
+
+/* ---------- Preview modal backdrop + panel ---------- */
+
+.chat-export-preview-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(17, 24, 39, 0.45);
+    backdrop-filter: blur(2px);
+    -webkit-backdrop-filter: blur(2px);
+    z-index: 100020;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+    pointer-events: auto;
+}
+
+.chat-export-preview-backdrop.is-open {
+    opacity: 1;
+}
+
+.chat-export-preview-backdrop[hidden] {
+    display: none;
+}
+
+.chat-export-preview-panel {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: min(920px, 94vw);
+    max-height: 90vh;
+    background: #ffffff;
+    border-radius: 16px;
+    box-shadow: 0 24px 60px rgba(15, 23, 42, 0.25);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    overflow-y: auto;
+    z-index: 100021;
+    opacity: 0;
+    transition: opacity 0.2s ease, transform 0.2s ease;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: #1f2937;
+    pointer-events: auto;
+}
+
+.chat-export-preview-panel.is-open {
+    opacity: 1;
+}
+
+.chat-export-preview-panel[hidden] {
+    display: none;
+}
+
+body.chat-export-modal-open {
+    overflow: hidden;
+}
+
+/* ---------- Header ---------- */
+
+.chat-export-preview-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 18px 22px 14px 22px;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+    flex-shrink: 0;
+}
+
+.chat-export-preview-title {
+    margin: 0;
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: #0f172a;
+}
+
+.chat-export-preview-summary {
+    font-size: 0.85rem;
+    color: #64748b;
+    flex: 1;
+}
+
+.chat-export-preview-close {
+    width: 36px;
+    height: 36px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    font-size: 1.1rem;
+    line-height: 1;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: background 0.18s ease, transform 0.15s ease;
+    pointer-events: auto;
+}
+
+.chat-export-preview-close:hover {
+    background: rgba(239, 68, 68, 0.12);
+    transform: scale(1.15);
+}
+
+/* ---------- Selection section ---------- */
+
+.chat-export-selection-section {
+    padding: 14px 22px 10px 22px;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+    flex-shrink: 0;
+}
+
+.chat-export-selection-toolbar {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+}
+
+.chat-export-selection-tool {
+    padding: 5px 12px;
+    border: 1px solid rgba(148, 163, 184, 0.4);
+    border-radius: 999px;
+    background: #ffffff;
+    color: #475569;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+}
+
+.chat-export-selection-tool:hover {
+    background: #e0f7ff;
+    border-color: #7dd3fc;
+    color: #0369a1;
+}
+
+.chat-export-selection-list {
+    max-height: 28vh;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding-right: 4px;
+}
+
+.chat-export-selection-list::-webkit-scrollbar {
+    width: 8px;
+}
+
+.chat-export-selection-list::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.4);
+    border-radius: 4px;
+}
+
+.chat-export-selection-row {
+    display: flex;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+
+.chat-export-selection-row:hover {
+    background: rgba(241, 245, 249, 0.7);
+}
+
+.chat-export-selection-checkbox {
+    flex-shrink: 0;
+    margin-top: 3px;
+    width: 16px;
+    height: 16px;
+    accent-color: #38bdf8;
+    cursor: pointer;
+}
+
+.chat-export-selection-body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.chat-export-selection-meta {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    font-size: 0.78rem;
+}
+
+.chat-export-selection-author {
+    font-weight: 600;
+    color: #334155;
+}
+
+.chat-export-selection-time {
+    color: #94a3b8;
+}
+
+.chat-export-selection-preview {
+    font-size: 0.82rem;
+    color: #64748b;
+    line-height: 1.4;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* ---------- Controls (format + style chips) ---------- */
+
+.chat-export-preview-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 18px;
+    padding: 12px 22px;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.chat-export-format-group,
+.chat-export-style-group,
+.chat-export-image-format-group {
+    display: inline-flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.chat-export-image-options {
+    display: inline-flex;
+    gap: 14px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.chat-export-format-chip,
+.chat-export-style-chip,
+.chat-export-image-format-chip {
+    padding: 6px 14px;
+    border: 1px solid rgba(148, 163, 184, 0.4);
+    border-radius: 999px;
+    background: #ffffff;
+    color: #475569;
+    font-size: 0.82rem;
+    cursor: pointer;
+    transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.chat-export-format-chip:hover,
+.chat-export-style-chip:hover,
+.chat-export-image-format-chip:hover {
+    background: #e0f7ff;
+    border-color: #7dd3fc;
+    color: #0369a1;
+}
+
+.chat-export-format-chip.is-active,
+.chat-export-style-chip.is-active,
+.chat-export-image-format-chip.is-active {
+    background: #dff6ff;
+    border-color: #38bdf8;
+    color: #0369a1;
+    box-shadow: 0 4px 10px rgba(56, 189, 248, 0.28);
+}
+
+/* ---------- Preview body ---------- */
+
+.chat-export-preview-body {
+    position: relative;
+    flex: 1 1 0;
+    min-height: 200px;
+    max-height: 40vh;
+    background: #f8fafc;
+    overflow: hidden;
+    display: flex;
+}
+
+.chat-export-preview-frame {
+    flex: 1 1 0;
+    width: 100%;
+    min-height: 0;
+    border: 0;
+    background: #ffffff;
+}
+
+.chat-export-preview-frame[hidden] {
+    display: none;
+}
+
+.chat-export-preview-image-wrap {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: auto;
+    padding: 18px;
+}
+
+.chat-export-preview-image-wrap[hidden] {
+    display: none;
+}
+
+.chat-export-preview-image {
+    max-width: 100%;
+    max-height: 100%;
+    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.15);
+    border-radius: 8px;
+    display: block;
+}
+
+.chat-export-preview-placeholder {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(248, 250, 252, 0.92);
+    color: #64748b;
+    font-size: 0.9rem;
+    text-align: center;
+    padding: 16px;
+    pointer-events: none;
+}
+
+.chat-export-preview-placeholder[hidden] {
+    display: none;
+}
+
+/* ---------- Footer actions ---------- */
+
+.chat-export-preview-footer {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    padding: 14px 22px;
+    border-top: 1px solid rgba(148, 163, 184, 0.2);
+    flex-shrink: 0;
+    flex-wrap: wrap;
+}
+
+.chat-export-preview-action {
+    padding: 9px 18px;
+    border-radius: 10px;
+    border: 1px solid rgba(148, 163, 184, 0.4);
+    background: #ffffff;
+    color: #334155;
+    font-size: 0.88rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.chat-export-preview-action:hover:not(:disabled) {
+    background: #e0f7ff;
+    border-color: #7dd3fc;
+    color: #0369a1;
+}
+
+.chat-export-preview-action:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.chat-export-preview-action-primary {
+    background: #0ea5e9;
+    border-color: #0ea5e9;
+    color: #ffffff;
+    box-shadow: 0 4px 12px rgba(14, 165, 233, 0.3);
+}
+
+.chat-export-preview-action-primary:hover:not(:disabled) {
+    background: #0284c7;
+    border-color: #0284c7;
+    color: #ffffff;
+    box-shadow: 0 6px 16px rgba(2, 132, 199, 0.35);
+}
+
+/* ---------- Small screens ---------- */
+
+@media (max-width: 720px) {
+    .chat-export-preview-panel {
+        width: 100vw;
+        height: 100vh;
+        max-height: 100vh;
+        border-radius: 0;
+    }
+
+    .chat-export-selection-list {
+        max-height: 22vh;
+    }
+
+    .chat-export-preview-footer {
+        justify-content: flex-start;
+    }
+
+    .chat-export-preview-action {
+        flex: 1;
+    }
+}

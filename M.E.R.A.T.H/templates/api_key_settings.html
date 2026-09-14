@@ -1,0 +1,961 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title data-i18n="api.settingsTitle">API Key 设置 - Project N.E.K.O.</title>
+    <!-- i18next 加载器（统一处理 CDN 加载和初始化） -->
+    <script src="/static/i18n-i18next.js?v={{ static_asset_version }}"></script>
+    <link rel="stylesheet" href="/static/css/api_key_settings.css?v={{ static_asset_version }}">
+    <link rel="stylesheet" href="/static/css/window_controls.css?v={{ static_asset_version }}">
+    <link rel="stylesheet" href="/static/css/dark-mode.css?v={{ static_asset_version }}">
+    <link rel="stylesheet" href="/static/css/yui-guide.css?v={{ static_asset_version }}">
+    <link rel="stylesheet" href="/static/libs/driver.min.css?v={{ static_asset_version }}">
+    <link rel="stylesheet" href="/static/css/tutorial-styles.css?v={{ static_asset_version }}">
+    <script src="/static/theme-manager.js?v={{ static_asset_version }}"></script>
+    <script src="/static/js/window_controls.js?v={{ static_asset_version }}" defer></script>
+</head>
+
+<body class="api-key-settings-page">
+
+    <div id="loading-overlay"
+        style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255, 255, 255, 0.9); display: flex; justify-content: center; align-items: center; z-index: 9999;">
+        <div id="voice-preparing-toast" style="
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background-image: url('/static/icons/reminder_blue.png');
+        background-size: 100% 100%;
+        background-position: center;
+        background-repeat: no-repeat;
+        background-color: transparent;
+        color: white;
+        padding: 20px 32px;
+        border-radius: 16px;
+        font-size: 16px;
+        font-weight: 600;
+        z-index: 10000;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        animation: voiceToastFadeIn 0.3s ease;
+        pointer-events: none;
+        width: 320px;
+        box-sizing: border-box;
+        justify-content: center;
+    ">
+            <div style="
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255, 255, 255, 0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        "></div>
+            <span data-i18n="api.loadingConfig">正在加载配置...</span>
+        </div>
+    </div>
+
+    <!-- 主内容容器 - 直接显示原有UI，通过遮罩层半透明覆盖 -->
+    <div id="main-content">
+        <div class="container">
+            <div class="container-header page-title-bar">
+                <h2 data-i18n="api.settings" data-text="API Key Settings">API Key 设置</h2>
+                <div class="neko-window-controls">
+                    <button type="button" class="neko-window-control-btn" data-neko-window-control="pin" hidden data-i18n-title="common.pinWindow" data-i18n-aria="common.pinWindow" title="置顶窗口" aria-label="置顶窗口" aria-pressed="false">
+                        <span class="neko-window-pin-icon" aria-hidden="true"></span>
+                    </button>
+                    <button type="button" class="neko-window-control-btn" data-neko-window-control="minimize" data-i18n-title="common.minimize" data-i18n-aria="common.minimize" title="最小化" aria-label="最小化">
+                        <span class="neko-window-minimize-icon"></span>
+                    </button>
+                    <button type="button" class="neko-window-control-btn" data-neko-window-control="maximize" data-i18n-title="common.maximize" data-i18n-aria="common.maximize" title="最大化" aria-label="最大化">
+                        <span class="neko-window-maximize-icon"></span>
+                    </button>
+                    <button class="close-btn" onclick="closeSettingsPage()" data-i18n-title="common.close" data-i18n-aria="common.close" aria-label="关闭"><img
+                            src="/static/icons/close_button.png" data-i18n-alt="common.close" draggable="false"
+                            style="width: 32px; height: 32px;"></button>
+                </div>
+            </div>
+            <div class="container-content">
+                <div class="api-key-info">
+                    <h3>
+                        <img src="/static/icons/key.png" alt=""
+                            style="width: 48px; height: 48px; vertical-align: middle; margin-right: 8px;">
+                        <span data-i18n="api.quickStart">快速开始</span>
+                    </h3>
+                    <ul>
+                        <li><strong data-i18n="api.freeVersion">免费版（推荐新手）：</strong><br><span
+                                data-i18n="api.freeVersionDesc">无需注册，在下方高级选项中选择"免费版"即可使用</span></li>
+                        <li><strong data-i18n="api.fullVersion">完整版（获取API Key）：</strong></li>
+                        <li><em data-i18n="api.fullVersionNote">这只是一个例子，你完全可以使用OpenAI，Gemini或其他选项</em></li>
+                        <li>1. <span data-i18n="api.step1">在阿里云注册账号并</span> <a
+                                href="https://myaccount.console.aliyun.com/overview" target="_blank"
+                                data-i18n="api.step1Link">完成实名认证</a></li>
+                        <li>2. <span data-i18n="api.step2">访问阿里云百炼平台</span> <a
+                                href="https://bailian.console.aliyun.com/cn-beijing/?tab=model#/api-key" target="_blank"
+                                data-i18n="api.step2Link">APIKey管理页面</a></li>
+                        <li>3. <span data-i18n="api.step3">创建新的API Key并点击复制按钮</span></li>
+                        <li>4. <span data-i18n="api.step4">将API Key粘贴到下方输入框中</span></li>
+                    </ul>
+                </div>
+
+
+
+                <div class="section">
+                    <div class="api-key-info newbie-recommend">
+                        <h3>
+                            <img src="/static/icons/emotion_model_icon.png" alt=""
+                                style="width: 48px; height: 48px; vertical-align: middle; margin-right: 8px;">
+                            <span data-i18n="api.newbieRecommendTitle">新手推荐</span>
+                        </h3>
+                        <div style="color: var(--text-blue); font-weight: 500;">
+                            <strong data-i18n="api.newbieRecommend">如果您还没有API
+                                Key，可以直接在下方高级选项中选择"免费版"开始使用，无需注册任何账号！</strong>
+                        </div>
+                    </div>
+
+                    <!-- ============ Area 1: Core API Section ============ -->
+                    <div class="api-key-info">
+                        <h3>
+                            <img src="/static/icons/exclamation.png" alt=""
+                                style="width: 48px; height: 48px; vertical-align: middle; margin-right: 8px;">
+                            <span data-i18n="api.coreApiKey">核心API Key</span>
+                        </h3>
+                        <div class="tips"
+                            style="color: var(--text-blue-sub); font-weight: 500; margin-bottom: 16px;">
+                            <span data-i18n="api.tip">请确保API Key格式正确。配置后请注意点击屏幕下方的"保存设置"。</span>
+                        </div>
+
+                        <form id="api-key-form">
+                            <div class="field-row">
+                                <label for="coreApiSelect">
+                                    <span data-i18n="api.coreApiProvider">核心API（语音对话，仅支持全模态，DeepSeek 为纯文本不可用）</span>
+                                    <div class="tooltip-container">
+                                        <span class="tooltip-icon">?</span>
+                                        <div class="tooltip-content">
+                                            <div class="tooltip-scroll-content">
+                                                <strong data-i18n="api.coreApiTitle">核心API负责对话功能：</strong><br>
+                                                • <span data-i18n="api.freeVersionCore">免费版：完全免费，无需API
+                                                    Key，但不支持视频对话</span><br>
+                                                • <span data-i18n="api.aliCore">阿里：有免费额度，功能全面</span><br>
+                                                • <span data-i18n="api.glmCore">智谱：有免费额度，但需充值1元，内置联网搜索功能</span><br>
+                                                • <span data-i18n="api.stepCore">阶跃星辰：完全免费，但不支持视频</span><br>
+                                                • <span data-i18n="api.openaiCore">OpenAI：智能水平最高，但需要翻墙且价格昂贵</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </label>
+                                <select id="coreApiSelect" class="api-provider-select"
+                                    style="width: 100%; max-width: 600px;">
+                                    <!-- 选项将通过 JavaScript 动态加载 -->
+                                </select>
+                            </div>
+                            <div class="field-row">
+                                <label style="display: none;"><span data-i18n="api.coreApiKey">核心API Key</span><span
+                                        id="freeVersionHint" style="color: #28a745; font-weight: normal; display: none;"
+                                        data-i18n="api.freeVersionHint">（免费版无需填写）</span></label>
+                                <input type="text" id="apiKeyInput" data-i18n-placeholder="api.coreApiKeyPlaceholder"
+                                    placeholder="Enter your API Key" required style="max-width: 600px; width: 100%;">
+                                <em data-i18n="api.coreApiAutoFillHint" style="font-weight: normal; color: #888; font-size: 0.85em;">Key从API管理簿自动填充，也可在此直接输入</em>
+                            </div>
+                        </form>
+                    </div>
+
+                    <!-- current-api-key: 隐藏元素，仅用于存储状态供 JS 读取 -->
+                    <div id="current-api-key" style="display: none !important;"></div>
+
+                    <!-- ============ Area 2: Assist API Section (top-level) ============ -->
+                    <div class="api-key-info">
+                        <h3>
+                            <img src="/static/icons/summary_model_icon.png" alt=""
+                                style="width: 48px; height: 48px; vertical-align: middle; margin-right: 8px;">
+                            <span data-i18n="api.assistApiProvider">辅助API（记忆/Agent/文本聊天）</span>
+                            <div class="tooltip-container">
+                                <span class="tooltip-icon">?</span>
+                                <div class="tooltip-content">
+                                    <div class="tooltip-scroll-content">
+                                        <strong data-i18n="api.assistApiTitle">辅助API负责记忆管理、文本对话和Agent模式：</strong><br>
+                                        • <span data-i18n="api.freeVersionAssist">免费版：完全免费，无需API Key，Agent 有免费配额</span><br>
+                                        • <span data-i18n="api.aliAssist">阿里：推荐选择，功能最全面，支持Agent模式</span><br>
+                                        • <span data-i18n="api.glmAssist">智谱：支持Agent模式</span><br>
+                                        • <span data-i18n="api.stepAssist">阶跃星辰：价格相对便宜</span><br>
+                                        • <span data-i18n="api.siliconAssist">硅基流动：性价比高</span><br>
+                                        • <span data-i18n="api.openaiAssist">OpenAI：记忆管理能力强</span><br>
+                                        • <span data-i18n="api.geminiAssist">Gemini：智能和性价比极高，但国内版不支持</span><br>
+                                        • <span data-i18n="api.kimiAssist">Kimi：国内可用，支持长上下文和视觉</span><br>
+                                        • <span data-i18n="api.kimiCodeAssist">Kimi Code：Anthropic Messages 兼容格式，适合代码与长文本任务</span><br>
+                                        <strong data-i18n="api.assistApiNote">注意：不建议使用智谱和阶跃星辰。</strong>
+                                    </div>
+                                </div>
+                            </div>
+                        </h3>
+                        <div class="field-row">
+                            <label for="assistApiSelect">
+                                <span data-i18n="api.assistApiSelectLabel">辅助API服务商</span>
+                            </label>
+                            <div class="mimo-assist-select-row">
+                                <select id="assistApiSelect" class="api-provider-select"
+                                    style="width: 100%; max-width: 600px;">
+                                    <!-- 选项将通过 JavaScript 动态加载 -->
+                                </select>
+                                <label id="mimoTokenPlanToggleRow" class="disable-tts-toggle mimo-token-plan-toggle" style="display: none;">
+                                    <input type="checkbox" id="useMimoTokenPlan">
+                                    <span class="disable-tts-slider"></span>
+                                    <span data-i18n="api.useMimoTokenPlan">MiMo Token Plan</span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="field-row">
+                            <label for="assistApiKeyInput">
+                                <span data-i18n="api.assistApiKeyLabel">辅助API Key</span>
+                            </label>
+                            <input type="text" id="assistApiKeyInput"
+                                data-i18n-placeholder="api.assistApiKeyPlaceholder"
+                                placeholder="留空使用管理簿对应 Key" value=""
+                                style="max-width: 600px; width: 100%;">
+                            <em data-i18n="api.assistApiAutoFillHint" style="font-weight: normal; color: #888; font-size: 0.85em;">留空时自动使用管理簿中的Key，手动输入则独立保存</em>
+                        </div>
+                        <div id="mimoTokenPlanKeyRow" class="field-row" style="display: none;">
+                            <label for="mimoTokenPlanKeyInput">
+                                <span data-i18n="api.mimoTokenPlanKeyLabel">MiMo Token Plan Key</span>
+                            </label>
+                            <input type="text" id="mimoTokenPlanKeyInput"
+                                data-i18n-placeholder="api.mimoTokenPlanKeyPlaceholder"
+                                placeholder="tp-xxxxx" value=""
+                                style="max-width: 600px; width: 100%;">
+                            <em data-i18n="api.mimoTokenPlanKeyHint" style="font-weight: normal; color: #888; font-size: 0.85em;">启用 Token Plan 时只使用此 Key，不使用普通 MiMo API Key</em>
+                        </div>
+                        <div class="field-row" style="margin-top: 10px;">
+                            <label class="disable-tts-toggle">
+                                <input type="checkbox" id="disableTts" aria-describedby="disableTtsHintText">
+                                <span class="disable-tts-slider"></span>
+                                <span data-i18n="api.disableTts">禁用TTS</span>
+                            </label>
+                            <em id="disableTtsHintText" data-i18n="api.disableTtsHint" style="font-weight: normal; color: #888; font-size: 0.85em;">开启后不会调用任何语音合成服务</em>
+                        </div>
+                    </div>
+
+                    <!-- ============ Area 3: API Key Book (Collapsible) ============ -->
+                    <div id="key-book-section" class="section" style="margin-top: 0;">
+                        <button id="key-book-toggle-btn" onclick="toggleKeyBook()">
+                            <img src="/static/icons/dropdown_arrow.png" data-i18n-alt="common.expand" class="dropdown-icon">
+                            <span data-i18n="api.keyBookTitle">API 管理簿</span>
+                        </button>
+                        <div id="key-book-options" style="display: none;">
+                            <div style="background: #e7f3ff; border: 1px solid #b3d9ff; border-radius: 6px; padding: 16px; margin-bottom: 16px; font-size: 0.9em; color: var(--text-blue-sub); font-weight: 500; line-height: 1.6;">
+                                <span data-i18n="api.keyBookDescription">在此统一管理各服务商的API Key。核心API和辅助API选择服务商时会自动从管理簿中填充对应的Key。</span>
+                            </div>
+                            <div id="key-book-inputs">
+                                <!-- 由 JS renderKeyBook() 填充 -->
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- ============ Area 4: Custom API Section ============ -->
+                    <div id="custom-api-section">
+                        <button id="custom-api-toggle-btn" onclick="toggleCustomApiSection()">
+                            <img src="/static/icons/dropdown_arrow.png" data-i18n-alt="common.expand"
+                                class="dropdown-icon">
+                            <span data-i18n="api.customApiConfig">自定义API配置</span>
+                        </button>
+                        <div id="custom-api-options"
+                            style="display: none; padding: 12px 0 0 0; border-top: 1px solid #eee;">
+                            <div
+                                style="background: #f0f8ff; border: 1px solid #b3d9ff; border-radius: 6px; padding: 16px; margin-bottom: 16px; font-size: 0.9em; color: var(--text-blue-sub); font-weight: 500; line-height: 1.5;">
+                                <strong data-i18n="api.customApiDescription">自定义API说明：</strong><br>
+                                <span
+                                    data-i18n="api.customApiDescriptionText">这些API用于特定的功能模块，如摘要生成、文本纠错、情感分析、视觉识别、全模态对话和语音合成。每个API都需要单独配置供应商、URL、模型ID和API
+                                    Key。</span><br>
+                                <strong data-i18n="api.customApiWarning">
+                                    注意：启用自定义API后，将优先使用下方的自定义配置，核心API和辅助API仍可单独调整。</strong>
+                            </div>
+
+                            <!-- 启用自定义API开关 -->
+                            <div class="custom-api-toggle-wrapper">
+                                <input type="checkbox" id="enableCustomApi">
+                                <label for="enableCustomApi" class="custom-api-toggle-btn">
+                                    <span class="custom-api-toggle-icon"></span>
+                                    <span class="custom-api-toggle-text"
+                                        data-i18n="api.enableCustomApi">启用自定义API配置</span>
+                                </label>
+                                <div class="custom-api-toggle-note" data-i18n="api.enableCustomApiNote">
+                                    启用后将优先使用自定义API配置，不再强制绑定核心API与辅助API，但仍可手动调整它们
+                                </div>
+                            </div>
+
+                            <!-- 自定义API折叠容器 -->
+                            <div id="custom-api-container" class="custom-api-container" style="display: none;">
+
+                                <!-- 清空自定义API按钮 -->
+                                <div class="clear-custom-api-wrapper">
+                                    <button type="button" id="clearCustomApiBtn" class="clear-custom-api-btn" onclick="clearCustomApi()">
+                                        <span data-i18n="api.clearCustomApi">清空自定义API配置</span>
+                                    </button>
+                                </div>
+
+                                <!-- 文本聊天模型 -->
+                                <div class="model-config-container">
+                                    <div class="model-header" onclick="toggleModelConfig('conversation')">
+                                        <span class="model-title">
+                                            <img src="/static/icons/correction_model_icon.png"
+                                                data-i18n-alt="api.conversationModelConfig"
+                                                class="model-title-icon">
+                                            <span data-i18n="api.conversationModelConfig">文本聊天模型</span>
+                                        </span>
+                                        <span class="toggle-icon">▼</span>
+                                    </div>
+                                    <div id="conversation-model-content" class="model-content">
+                                        <div class="field-row">
+                                            <label for="conversationModelProvider" data-i18n="api.providerLabel">服务商</label>
+                                            <select id="conversationModelProvider" class="api-provider-select" style="max-width: 600px;">
+                                            </select>
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="conversationModelUrl" data-i18n="api.apiUrl">API URL</label>
+                                            <input type="text" id="conversationModelUrl"
+                                                data-i18n-placeholder="api.baseUrlExamplePlaceholder"
+                                                placeholder="e.g., https://api.openai.com/v1" value=""
+                                                style="max-width: 600px;">
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="conversationModelId" data-i18n="api.modelId">模型ID</label>
+                                            <input type="text" id="conversationModelId"
+                                                data-i18n-placeholder="api.modelExamplePlaceholder"
+                                                placeholder="e.g., gpt-3.5-turbo, qwen-turbo, glm-4-flash" value=""
+                                                style="max-width: 600px;">
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="conversationModelApiKey" data-i18n="api.apiKey">API
+                                                Key</label>
+                                            <input type="text" id="conversationModelApiKey"
+                                                data-i18n-placeholder="api.conversationApiKeyPlaceholder"
+                                                placeholder="Enter Conversation API Key" value=""
+                                                style="max-width: 600px;">
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- 视觉聊天模型 -->
+                                <div class="model-config-container">
+                                    <div class="model-header" onclick="toggleModelConfig('vision')">
+                                        <span class="model-title">
+                                            <img src="/static/icons/vision_model_icon.png"
+                                                data-i18n-alt="api.visionModelConfig" class="model-title-icon">
+                                            <span data-i18n="api.visionModelConfig">视觉聊天模型</span>
+                                        </span>
+                                        <span class="toggle-icon">▼</span>
+                                    </div>
+                                    <div id="vision-model-content" class="model-content">
+                                        <div class="field-row">
+                                            <label for="visionModelProvider" data-i18n="api.providerLabel">服务商</label>
+                                            <select id="visionModelProvider" class="api-provider-select" style="max-width: 600px;">
+                                            </select>
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="visionModelUrl" data-i18n="api.apiUrl">API URL</label>
+                                            <input type="text" id="visionModelUrl"
+                                                data-i18n-placeholder="api.baseUrlExamplePlaceholder"
+                                                placeholder="e.g., https://api.openai.com/v1" value=""
+                                                style="max-width: 600px;">
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="visionModelId" data-i18n="api.modelId">模型ID</label>
+                                            <input type="text" id="visionModelId"
+                                                data-i18n-placeholder="api.visionModelExamplePlaceholder"
+                                                placeholder="e.g., gpt-4-vision-preview, qwen-vl-plus" value=""
+                                                style="max-width: 600px;">
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="visionModelApiKey" data-i18n="api.apiKey">API Key</label>
+                                            <input type="text" id="visionModelApiKey"
+                                                data-i18n-placeholder="api.visionModelApiKeyPlaceholder"
+                                                placeholder="Enter Vision API Key" value=""
+                                                style="max-width: 600px;">
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- 摘要模型 -->
+                                <div class="model-config-container">
+                                    <div class="model-header" onclick="toggleModelConfig('summary')">
+                                        <span class="model-title">
+                                            <img src="/static/icons/summary_model_icon.png"
+                                                data-i18n-alt="api.summaryModelConfig" class="model-title-icon">
+                                            <span data-i18n="api.summaryModelConfig">摘要模型</span>
+                                        </span>
+                                        <span class="toggle-icon">▼</span>
+                                    </div>
+                                    <div id="summary-model-content" class="model-content">
+                                        <div class="field-row">
+                                            <label for="summaryModelProvider" data-i18n="api.providerLabel">服务商</label>
+                                            <select id="summaryModelProvider" class="api-provider-select" style="max-width: 600px;">
+                                            </select>
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="summaryModelUrl" data-i18n="api.apiUrl">API URL</label>
+                                            <input type="text" id="summaryModelUrl"
+                                                data-i18n-placeholder="api.baseUrlExamplePlaceholder"
+                                                placeholder="e.g., https://api.openai.com/v1" value=""
+                                                style="max-width: 600px;">
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="summaryModelId" data-i18n="api.modelId">模型ID</label>
+                                            <input type="text" id="summaryModelId"
+                                                data-i18n-placeholder="api.modelExamplePlaceholder"
+                                                placeholder="e.g., gpt-3.5-turbo, qwen-turbo, glm-4-flash" value=""
+                                                style="max-width: 600px;">
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="summaryModelApiKey" data-i18n="api.apiKey">API Key</label>
+                                            <input type="text" id="summaryModelApiKey"
+                                                data-i18n-placeholder="api.summaryModelApiKeyPlaceholder"
+                                                placeholder="Enter Summary API Key" value=""
+                                                style="max-width: 600px;">
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- 纠错模型 -->
+                                <div class="model-config-container">
+                                    <div class="model-header" onclick="toggleModelConfig('correction')">
+                                        <span class="model-title">
+                                            <img src="/static/icons/correction_model_icon.png"
+                                                data-i18n-alt="api.correctionModelConfig" class="model-title-icon">
+                                            <span data-i18n="api.correctionModelConfig">纠错模型</span>
+                                        </span>
+                                        <span class="toggle-icon">▼</span>
+                                    </div>
+                                    <div id="correction-model-content" class="model-content">
+                                        <div class="field-row">
+                                            <label for="correctionModelProvider" data-i18n="api.providerLabel">服务商</label>
+                                            <select id="correctionModelProvider" class="api-provider-select" style="max-width: 600px;">
+                                            </select>
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="correctionModelUrl" data-i18n="api.apiUrl">API URL</label>
+                                            <input type="text" id="correctionModelUrl"
+                                                data-i18n-placeholder="api.baseUrlExamplePlaceholder"
+                                                placeholder="e.g., https://api.openai.com/v1" value=""
+                                                style="max-width: 600px;">
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="correctionModelId" data-i18n="api.modelId">模型ID</label>
+                                            <input type="text" id="correctionModelId"
+                                                data-i18n-placeholder="api.modelExamplePlaceholder"
+                                                placeholder="e.g., gpt-3.5-turbo, qwen-turbo, glm-4-flash" value=""
+                                                style="max-width: 600px;">
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="correctionModelApiKey" data-i18n="api.apiKey">API Key</label>
+                                            <input type="text" id="correctionModelApiKey"
+                                                data-i18n-placeholder="api.correctionModelApiKeyPlaceholder"
+                                                placeholder="Enter Correction API Key" value=""
+                                                style="max-width: 600px;">
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- 情感模型 -->
+                                <div class="model-config-container">
+                                    <div class="model-header" onclick="toggleModelConfig('emotion')">
+                                        <span class="model-title">
+                                            <img src="/static/icons/emotion_model_icon.png"
+                                                data-i18n-alt="api.emotionModelConfig" class="model-title-icon">
+                                            <span data-i18n="api.emotionModelConfig">情感模型</span>
+                                        </span>
+                                        <span class="toggle-icon">▼</span>
+                                    </div>
+                                    <div id="emotion-model-content" class="model-content">
+                                        <div class="field-row">
+                                            <label for="emotionModelProvider" data-i18n="api.providerLabel">服务商</label>
+                                            <select id="emotionModelProvider" class="api-provider-select" style="max-width: 600px;">
+                                            </select>
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="emotionModelUrl" data-i18n="api.apiUrl">API URL</label>
+                                            <input type="text" id="emotionModelUrl"
+                                                data-i18n-placeholder="api.baseUrlExamplePlaceholder"
+                                                placeholder="e.g., https://api.openai.com/v1" value=""
+                                                style="max-width: 600px;">
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="emotionModelId" data-i18n="api.modelId">模型ID</label>
+                                            <input type="text" id="emotionModelId"
+                                                data-i18n-placeholder="api.modelExamplePlaceholder"
+                                                placeholder="e.g., gpt-3.5-turbo, qwen-turbo, glm-4-flash" value=""
+                                                style="max-width: 600px;">
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="emotionModelApiKey" data-i18n="api.apiKey">API Key</label>
+                                            <input type="text" id="emotionModelApiKey"
+                                                data-i18n-placeholder="api.emotionModelApiKeyPlaceholder"
+                                                placeholder="Enter Emotion API Key" value=""
+                                                style="max-width: 600px;">
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- 实时全模态模型 -->
+                                <div class="model-config-container">
+                                    <div class="model-header" onclick="toggleModelConfig('omni')">
+                                        <span class="model-title">
+                                            <img src="/static/icons/omni_model_icon.png"
+                                                data-i18n-alt="api.realtimeModelConfig" class="model-title-icon">
+                                            <span data-i18n="api.realtimeModelConfig">实时全模态模型（Local模式）</span>
+                                        </span>
+                                        <span class="toggle-icon">▼</span>
+                                    </div>
+                                    <div id="omni-model-content" class="model-content">
+                                        <div class="field-row">
+                                            <label for="omniModelProvider" data-i18n="api.providerLabel">服务商</label>
+                                            <select id="omniModelProvider" class="api-provider-select" style="max-width: 600px;">
+                                            </select>
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="omniModelUrl"><span data-i18n="api.apiUrl">API URL</span><em
+                                                    data-i18n="api.omniApiUrlNote">（必须是WebSocket地址，以ws://或wss://开头）</em></label>
+                                            <input type="text" id="omniModelUrl"
+                                                data-i18n-placeholder="api.realtimeWsUrlExamplePlaceholder"
+                                                placeholder="e.g., wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+                                                value="" style="max-width: 600px;">
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="omniModelId" data-i18n="api.modelId">模型ID</label>
+                                            <input type="text" id="omniModelId"
+                                                data-i18n-placeholder="api.realtimeModelExamplePlaceholder"
+                                                placeholder="e.g., qwen-realtime-plus" value=""
+                                                style="max-width: 600px;">
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="omniModelApiKey" data-i18n="api.apiKey">API Key</label>
+                                            <input type="text" id="omniModelApiKey"
+                                                data-i18n-placeholder="api.omniModelApiKeyPlaceholder"
+                                                placeholder="Enter Realtime API Key" value=""
+                                                style="max-width: 600px;">
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Agent API -->
+                                <div class="model-config-container">
+                                    <div class="model-header" onclick="toggleModelConfig('agent')">
+                                        <span class="model-title">
+                                            <img src="/static/icons/correction_model_icon.png"
+                                                data-i18n-alt="api.agentApiConfigTitle" class="model-title-icon">
+                                            <span data-i18n="api.agentApiConfigTitle">Agent API（需支持视觉功能）</span>
+                                        </span>
+                                        <span class="toggle-icon">▼</span>
+                                    </div>
+                                    <div id="agent-model-content" class="model-content">
+                                        <div class="field-row">
+                                            <label for="agentModelProvider" data-i18n="api.providerLabel">服务商</label>
+                                            <select id="agentModelProvider" class="api-provider-select" style="max-width: 600px;">
+                                            </select>
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="agentModelUrl" data-i18n="api.apiUrl">API URL</label>
+                                            <input type="text" id="agentModelUrl"
+                                                data-i18n-placeholder="api.agentModelUrlPlaceholder"
+                                                placeholder="Leave blank to follow Assist API vision model URL"
+                                                value="" style="max-width: 600px;">
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="agentModelId" data-i18n="api.modelId">模型ID</label>
+                                            <input type="text" id="agentModelId"
+                                                data-i18n-placeholder="api.agentModelIdPlaceholder"
+                                                placeholder="Leave blank to follow Assist API vision model ID"
+                                                value="" style="max-width: 600px;">
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="agentModelApiKey" data-i18n="api.apiKey">API Key</label>
+                                            <input type="text" id="agentModelApiKey"
+                                                data-i18n-placeholder="api.agentModelApiKeyPlaceholder"
+                                                placeholder="Leave blank to follow Assist API Key (not available for 'free')"
+                                                value="" style="max-width: 600px;">
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- TTS模型 -->
+                                <div class="model-config-container">
+                                    <div class="model-header" onclick="toggleModelConfig('tts')">
+                                        <span class="model-title">
+                                            <img src="/static/icons/tts_model_icon.png"
+                                                data-i18n-alt="api.ttsModelConfig" class="model-title-icon">
+                                            <span data-i18n="api.ttsModelConfig">TTS模型</span>
+                                        </span>
+                                        <span class="toggle-icon">▼</span>
+                                    </div>
+                                    <div id="tts-model-content" class="model-content">
+                                        <div class="field-row">
+                                            <label for="ttsModelProvider" data-i18n="api.providerLabel">服务商</label>
+                                            <select id="ttsModelProvider" class="api-provider-select" style="max-width: 600px;">
+                                            </select>
+                                        </div>
+                                        <div id="tts-protocol-hint" class="tips"
+                                            style="display: none; max-width: 600px; margin: 0 0 12px 0; color: var(--text-blue-sub); font-size: 0.88em; line-height: 1.5;"></div>
+                                        <!-- 标准 TTS 端点字段：仅在所选 provider 用标准 url/model/key/voice
+                                             时显示；GPT-SoVITS 走下方自己的字段（由 onCustomModelProviderChange 切换） -->
+                                        <div id="tts-standard-fields">
+                                        <div class="field-row">
+                                            <label for="ttsModelUrl" data-i18n="api.apiUrl">API URL</label>
+                                            <input type="text" id="ttsModelUrl"
+                                                data-i18n-placeholder="api.ttsBaseUrlExamplePlaceholder"
+                                                placeholder="e.g., https://dashscope.aliyuncs.com/api/v1/services/aigc/tts/chat"
+                                                value="" style="max-width: 600px;">
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="ttsModelId" data-i18n="api.modelId">模型ID</label>
+                                            <input type="text" id="ttsModelId"
+                                                data-i18n-placeholder="api.ttsModelExamplePlaceholder"
+                                                placeholder="e.g., tts-1, speech-01-turbo" value=""
+                                                style="max-width: 600px;">
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="ttsModelApiKey" data-i18n="api.apiKey">API Key</label>
+                                            <input type="text" id="ttsModelApiKey"
+                                                data-i18n-placeholder="api.ttsModelApiKeyPlaceholder"
+                                                placeholder="Enter TTS API Key" value="" style="max-width: 600px;">
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="ttsVoiceId">
+                                                <span data-i18n="api.ttsVoiceId">Voice ID</span>
+                                                <em data-i18n="api.ttsVoiceIdHint">（可选，角色未设置时的回退音色）</em>
+                                            </label>
+                                            <input type="text" id="ttsVoiceId"
+                                                data-i18n-placeholder="api.ttsVoiceExamplePlaceholder"
+                                                placeholder="e.g., Chinese Female, alloy" value=""
+                                                style="max-width: 600px;">
+                                        </div>
+                                        </div>
+                                        <!-- GPT-SoVITS 专属字段：选 ttsModelProvider=='gptsovits' 时显示。
+                                             GSV 不再用独立启用开关，「是否启用」= 下拉是否选中 gptsovits。 -->
+                                        <div id="gptsovits-config-fields" style="display: none;">
+                                            <div
+                                                style="background: #fff8e6; border: 1px solid #ffe0b3; border-radius: 6px; padding: 12px; margin: 12px 0; font-size: 0.85em; color: #996600; line-height: 1.5;">
+                                                <strong data-i18n="api.gptsovitsDescription">GPT-SoVITS
+                                                    说明：</strong><br>
+                                                <span data-i18n="api.gptsovitsDescriptionText">本地部署的语音克隆模型，需要先启动
+                                                    GPT-SoVITS v3 API 服务。声音配置（参考音频、模型权重等）在 v3 的 voices/*.toml
+                                                    文件中管理，此处只需填写声音配置 ID。</span>
+                                            </div>
+
+                                            <!-- 教程文档跳转：中文/其它语言走不同文档，href 由
+                                                 updateGptSovitsTutorialLink() 按当前语言设置（默认中文） -->
+                                            <div style="margin: 0 0 12px;">
+                                                <a id="gptsovitsTutorialLink"
+                                                    href="https://docs.qq.com/aio/DQ1dDcU9rdURQTWJE?p=RLq03bnCUOGEIa8YwBS58H&amp;client_hint=0"
+                                                    target="_blank" rel="noopener noreferrer"
+                                                    class="gsv-tutorial-link">
+                                                    📄 <span data-i18n="api.gptsovitsTutorialDoc">教程文档</span>
+                                                </a>
+                                            </div>
+
+                                            <!-- API 配置 -->
+                                            <div class="field-row">
+                                                <label for="gptsovitsApiUrl">
+                                                    <span data-i18n="api.apiUrl">API URL</span>
+                                                    <em style="font-weight: normal; color: #888;"
+                                                        data-i18n="api.gptsovitsApiUrlOptional">（选填，默认
+                                                        http://127.0.0.1:9881）</em>
+                                                </label>
+                                                <input type="text" id="gptsovitsApiUrl"
+                                                    data-i18n-placeholder="api.gptsovitsApiUrlPlaceholder"
+                                                    placeholder="http://127.0.0.1:9881"
+                                                    value="http://127.0.0.1:9881" style="max-width: 600px;">
+                                            </div>
+
+                                            <div class="field-row">
+                                                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+                                                    <label for="gptsovitsVoiceId" style="margin-bottom: 0;">
+                                                        <span data-i18n="api.gptsovitsVoiceId">默认声音配置</span>
+                                                        <em style="font-weight: normal; color: #888;"
+                                                            data-i18n="api.gptsovitsVoiceIdHint">（角色管理中设置的 Voice ID 会覆盖此默认配置）</em>
+                                                    </label>
+                                                    <button type="button" onclick="fetchGptSovitsVoices()"
+                                                        class="gsv-refresh-btn"
+                                                        data-i18n="api.gptsovitsRefreshVoices">刷新列表</button>
+                                                </div>
+                                                <!-- 隐藏 input 存储选中的 voice_id -->
+                                                <input type="hidden" id="gptsovitsVoiceId" value="">
+                                                <!-- 可滚动的声音卡片网格 -->
+                                                <div id="gsv-voices-grid" class="gsv-voices-grid" role="radiogroup" aria-label="GPT-SoVITS voice list">
+                                                    <div class="gsv-voices-empty" data-i18n="api.gptsovitsVoiceIdEmpty">-- 请先刷新获取语音列表 --</div>
+                                                </div>
+                                            </div>
+
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- 小游戏模型 -->
+                                <div class="model-config-container">
+                                    <button type="button" class="model-header" onclick="toggleModelConfig('game')" aria-expanded="false" aria-controls="game-model-content">
+                                        <span class="model-title">
+                                            <img src="/static/icons/correction_model_icon.png"
+                                                data-i18n-alt="api.gameModelsConfig"
+                                                class="model-title-icon">
+                                            <span data-i18n="api.gameModelsConfig">小游戏模型</span>
+                                        </span>
+                                        <span class="toggle-icon">▼</span>
+                                    </button>
+                                    <div id="game-model-content" class="model-content">
+                                        <div class="nested-model-config-container">
+                                            <button type="button" class="model-header nested-model-header" onclick="toggleModelConfig('game-main')" aria-expanded="false" aria-controls="game-main-model-content">
+                                                <span class="model-title">
+                                                    <span data-i18n="api.gameMainModelConfig">小游戏主模型配置</span>
+                                                </span>
+                                                <span class="toggle-icon">▼</span>
+                                            </button>
+                                            <div id="game-main-model-content" class="model-content nested-model-content">
+                                                <div class="field-row">
+                                                    <label for="gameMainModelProvider" data-i18n="api.providerLabel">服务商</label>
+                                                    <select id="gameMainModelProvider" class="api-provider-select" style="max-width: 600px;">
+                                                    </select>
+                                                </div>
+                                                <div class="field-row">
+                                                    <label for="gameMainModelUrl" data-i18n="api.apiUrl">API URL</label>
+                                                    <input type="text" id="gameMainModelUrl"
+                                                        data-i18n-placeholder="api.baseUrlExamplePlaceholder"
+                                                        placeholder="e.g., https://api.openai.com/v1" value=""
+                                                        style="max-width: 600px;">
+                                                </div>
+                                                <div class="field-row">
+                                                    <label for="gameMainModelId" data-i18n="api.modelId">模型ID</label>
+                                                    <input type="text" id="gameMainModelId"
+                                                        data-i18n-placeholder="api.modelExamplePlaceholder"
+                                                        placeholder="e.g., gpt-3.5-turbo, qwen-turbo, glm-4-flash" value=""
+                                                        style="max-width: 600px;">
+                                                </div>
+                                                <div class="field-row">
+                                                    <label for="gameMainModelApiKey" data-i18n="api.apiKey">API Key</label>
+                                                    <input type="text" id="gameMainModelApiKey"
+                                                        data-i18n-placeholder="api.gameMainModelApiKeyPlaceholder"
+                                                        placeholder="Enter Mini-game Main Model API Key" value=""
+                                                        style="max-width: 600px;">
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="nested-model-config-container">
+                                            <button type="button" class="model-header nested-model-header" onclick="toggleModelConfig('game-summary')" aria-expanded="false" aria-controls="game-summary-model-content">
+                                                <span class="model-title">
+                                                    <span data-i18n="api.gameSummaryModelConfig">小游戏摘要模型配置</span>
+                                                </span>
+                                                <span class="toggle-icon">▼</span>
+                                            </button>
+                                            <div id="game-summary-model-content" class="model-content nested-model-content">
+                                                <div class="field-row">
+                                                    <label for="gameSummaryModelProvider" data-i18n="api.providerLabel">服务商</label>
+                                                    <select id="gameSummaryModelProvider" class="api-provider-select" style="max-width: 600px;">
+                                                    </select>
+                                                </div>
+                                                <div class="field-row">
+                                                    <label for="gameSummaryModelUrl" data-i18n="api.apiUrl">API URL</label>
+                                                    <input type="text" id="gameSummaryModelUrl"
+                                                        data-i18n-placeholder="api.baseUrlExamplePlaceholder"
+                                                        placeholder="e.g., https://api.openai.com/v1" value=""
+                                                        style="max-width: 600px;">
+                                                </div>
+                                                <div class="field-row">
+                                                    <label for="gameSummaryModelId" data-i18n="api.modelId">模型ID</label>
+                                                    <input type="text" id="gameSummaryModelId"
+                                                        data-i18n-placeholder="api.modelExamplePlaceholder"
+                                                        placeholder="e.g., gpt-3.5-turbo, qwen-turbo, glm-4-flash" value=""
+                                                        style="max-width: 600px;">
+                                                </div>
+                                                <div class="field-row">
+                                                    <label for="gameSummaryModelApiKey" data-i18n="api.apiKey">API Key</label>
+                                                    <input type="text" id="gameSummaryModelApiKey"
+                                                        data-i18n-placeholder="api.gameSummaryModelApiKeyPlaceholder"
+                                                        placeholder="Enter Mini-game Summary Model API Key" value=""
+                                                        style="max-width: 600px;">
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- 图片生成 -->
+                                <div class="model-config-container">
+                                    <button type="button" class="model-header" onclick="toggleModelConfig('image')"
+                                        aria-controls="image-model-content" aria-expanded="false"
+                                        style="width: 100%; border: 0; text-align: left; font: inherit;">
+                                        <span class="model-title">
+                                            <img src="/static/icons/vision_model_icon.png"
+                                                data-i18n-alt="api.imageModelConfig" class="model-title-icon">
+                                            <span data-i18n="api.imageModelConfig">图片生成</span>
+                                        </span>
+                                        <span class="toggle-icon">▼</span>
+                                    </button>
+                                    <div id="image-model-content" class="model-content">
+                                        <div class="field-row">
+                                            <label for="imageModelProvider" data-i18n="api.providerLabel">服务商</label>
+                                            <select id="imageModelProvider" onchange="onImageProviderChange()" class="api-provider-select" style="max-width: 600px;">
+                                            </select>
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="imageModelUrl" data-i18n="api.apiUrl">API URL</label>
+                                            <input type="text" id="imageModelUrl"
+                                                data-i18n-placeholder="api.baseUrlExamplePlaceholder"
+                                                placeholder="e.g., https://api.openai.com/v1" value=""
+                                                style="max-width: 600px;">
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="imageModelId" data-i18n="api.modelId">模型ID</label>
+                                            <input type="text" id="imageModelId"
+                                                data-i18n-placeholder="api.imageModelExamplePlaceholder"
+                                                placeholder="e.g., gpt-image-2, wanx2.1-t2i-turbo" value=""
+                                                style="max-width: 600px;">
+                                        </div>
+                                        <div class="field-row">
+                                            <label for="imageModelApiKey" data-i18n="api.apiKey">API Key</label>
+                                            <input type="text" id="imageModelApiKey"
+                                                data-i18n-placeholder="api.imageModelApiKeyPlaceholder"
+                                                placeholder="API Key" value=""
+                                                style="max-width: 600px;">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 弹出式警告 -->
+        <div id="warning-modal" class="modal-overlay" onclick="closeWarningModal()">
+            <div class="modal-warning" onclick="event.stopPropagation()">
+                <h3 data-i18n="api.apiKeyChangeWarning.title">⚠️ 重要提醒</h3>
+                <p data-i18n="api.apiKeyChangeWarning.message">检测到您正在更换 API Key，请注意以下事项：</p>
+                <ul>
+                    <li data-i18n="api.apiKeyChangeWarning.voiceIdBinding">Voice ID 与您的 API Key 绑定，更换 API Key
+                        后所有已注册的 Voice ID 将失效</li>
+                    <li data-i18n="api.apiKeyChangeWarning.reRegisterVoice">建议在更换 API Key 后重新注册所需的音色</li>
+                </ul>
+                <div class="modal-buttons">
+                    <button type="button" class="btn secondary" onclick="closeWarningModal()"
+                        data-i18n="api.apiKeyChangeWarning.cancel">取消</button>
+                    <button type="button" class="btn" onclick="confirmApiKeyChange()"
+                        data-i18n="api.apiKeyChangeWarning.continue">继续保存</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 阿里美国 API 提醒 -->
+        <div id="aliyun-us-api-warning-modal" class="modal-overlay" onclick="closeAliyunUsApiWarningModal()">
+            <div class="modal-warning" onclick="event.stopPropagation()">
+                <h3 data-i18n="api.aliyunUsApiWarning.title">阿里美国 API 提醒</h3>
+                <p data-i18n="api.aliyunUsApiWarning.message">当前使用了阿里的美国API，不支持TTS与实时语音，建议更换阿里的新加坡API</p>
+                <div class="modal-buttons">
+                    <button type="button" class="btn" onclick="closeAliyunUsApiWarningModal()"
+                        data-i18n="api.wsWarning.confirm">我知道了</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 清空自定义API确认弹窗 -->
+        <div id="clear-custom-api-modal" class="modal-overlay" onclick="closeClearCustomApiModal()">
+            <div class="modal-warning" onclick="event.stopPropagation()">
+                <h3 data-i18n="api.clearCustomApiConfirmTitle">⚠️ 确认清空</h3>
+                <p data-i18n="api.clearCustomApiConfirm">确定要清空所有自定义API配置吗？这将清除所有自定义API Key、模型ID、URL，并取消勾选GPT-SoVITS。</p>
+                <p style="color: #ff6b35; font-weight: 500; margin-top: 8px;" data-i18n="api.clearCustomApiSaveHint">⚠ 此操作仅清空页面上的配置内容，保存清空结果仍需点击下方的「保存设置」按钮。</p>
+                <div class="modal-buttons">
+                    <button type="button" class="btn secondary" onclick="closeClearCustomApiModal()"
+                        data-i18n="common.cancel">取消</button>
+                    <button type="button" class="btn" style="background: #ee5a24;" onclick="confirmClearCustomApi()"
+                        data-i18n="api.clearCustomApiConfirmBtn">确认清空</button>
+                </div>
+            </div>
+        </div>
+
+    </div> <!-- 关闭 main-content -->
+
+
+    <div class="save-button-box" >
+        <div id="status" class="status"></div>
+        <div style="margin-top: 20px;">
+            <button type="button" id="save-settings-btn" onclick="save_button_down(event)">
+                <img src="/static/icons/import_model_button_icon.png" data-i18n-alt="common.save"
+                    class="button-icon">
+                <span data-i18n="api.saveSettings">保存设置</span>
+            </button>
+        </div>
+    </div>
+
+
+    <!-- Independent revision forces existing clients off the previously cached
+         API-key settings script after a settings-display behavior change. -->
+    <script src="/static/js/api_key_settings.js?v={{ static_asset_version }}-api-key-mask-v8"></script>
+
+
+    <script src="/static/tutorial/core/guide-helpers.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/scoped-resources.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/bridge-command-bus.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/target-geometry-registry.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/chat-window-adapter.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/command-registry.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/script-normalizer.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/timeline-engine.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/visual-runtime.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/yui-guide/common.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/yui-guide/days/day1-home-guide.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/yui-guide/days/day2-screen-voice-guide.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/yui-guide/days/day3-interaction-guide.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/yui-guide/days/day4-companion-guide.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/yui-guide/days/day5-personalization-guide.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/yui-guide/days/day6-agent-guide.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/yui-guide/days/day7-graduation-guide.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/yui-guide/steps.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/visual/overlay-renderer.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/yui-guide/overlay.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/yui-guide/page-handoff.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/interaction-takeover.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/avatar/yui-standin.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/avatar/standin-controller.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/visual/spotlight-controller.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/visual/ghost-cursor-controller.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/visual/petal-transition-controller.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/visual/highlight-controller.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/visual/controllers.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/visual/resistance-controllers.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/operation-registry.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/settings-tour-flow.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/scene-orchestrator.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/yui-guide/director/foundation.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/yui-guide/director/voice-queue.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/yui-guide/director/emotion-bridge.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/yui-guide/director/cursor-anchor-store.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/yui-guide/director/director-core.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/yui-guide/director/avatar-rounds.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/yui-guide/director/page-flows.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/yui-guide/director/chat-performance.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/yui-guide/director/lifecycle.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/yui-guide/director/bootstrap.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/skip-controller.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/avatar/reload-controller.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/round-prelude-controller.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/lifecycle-state-store.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/seven-day-state.js?v={{ static_asset_version }}"></script>
+    <!-- 通用教程管理器 -->
+    <script src="/static/libs/driver.min.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/universal-manager.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/page-tutorial-manager.js?v={{ static_asset_version }}"></script>
+
+    <!-- 初始化 -->
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            if (typeof initUniversalTutorialManager === 'function') {
+                initUniversalTutorialManager();
+            }
+            if (typeof initPageTutorialManager === 'function') {
+                initPageTutorialManager();
+            }
+        });
+    </script>
+</body>
+
+</html>

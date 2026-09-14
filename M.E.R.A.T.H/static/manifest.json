@@ -1,0 +1,20 @@
+{
+  "name": "Project N.E.K.O.",
+  "short_name": "N.E.K.O.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "icons": [
+    {
+      "src": "/static/neko_192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/static/neko_512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

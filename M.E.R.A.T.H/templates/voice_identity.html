@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title data-i18n="voiceIdentity.pageTitle">Owner 声纹</title>
+    <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+    <script src="/static/i18n-i18next.js?v={{ static_asset_version }}"></script>
+    <script src="/static/theme-manager.js?v={{ static_asset_version }}"></script>
+    <link rel="stylesheet" href="/static/css/voice_identity.css?v={{ static_asset_version }}">
+    <link rel="stylesheet" href="/static/css/window_controls.css?v={{ static_asset_version }}">
+    <link rel="stylesheet" href="/static/css/dark-mode.css?v={{ static_asset_version }}">
+    <script src="/static/common_dialogs.js?v={{ static_asset_version }}" defer></script>
+    <script src="/static/js/window_controls.js?v={{ static_asset_version }}" defer></script>
+    <script src="/static/js/voice_identity.js?v={{ static_asset_version }}" defer></script>
+</head>
+<body class="voice-identity-page">
+    <main class="voice-identity-shell container">
+        <header class="voice-identity-header container-header page-title-bar">
+            <h2 data-i18n="voiceIdentity.pageTitle" data-text="Owner 声纹">Owner 声纹</h2>
+            <div class="neko-window-controls">
+                <button type="button" class="neko-window-control-btn"
+                    data-neko-window-control="pin"
+                    data-i18n-title="common.pinWindow"
+                    data-i18n-aria="common.pinWindow"
+                    title="置顶窗口"
+                    aria-label="置顶窗口"
+                    aria-pressed="false"
+                    hidden>
+                    <span class="neko-window-pin-icon" aria-hidden="true"></span>
+                </button>
+                <button type="button" class="neko-window-control-btn"
+                    data-neko-window-control="minimize"
+                    data-i18n-title="common.minimize"
+                    data-i18n-aria="common.minimize"
+                    title="最小化"
+                    aria-label="最小化">
+                    <span class="neko-window-minimize-icon"></span>
+                </button>
+                <button type="button" class="neko-window-control-btn"
+                    data-neko-window-control="maximize"
+                    data-i18n-title="common.maximize"
+                    data-i18n-aria="common.maximize"
+                    title="最大化"
+                    aria-label="最大化">
+                    <span class="neko-window-maximize-icon"></span>
+                </button>
+                <button type="button" class="close-page-btn"
+                    data-neko-window-control="close"
+                    data-i18n-title="common.close"
+                    data-i18n-aria="common.close"
+                    title="关闭"
+                    aria-label="关闭">
+                    <img src="/static/icons/close_button.png" alt=""
+                        data-i18n-alt="common.close" draggable="false">
+                </button>
+            </div>
+        </header>
+
+        <div class="container-content">
+            <div class="voice-identity-content">
+                <section class="status-card" aria-labelledby="profile-status-title">
+                    <div class="status-copy">
+                        <span class="status-dot" id="voice-identity-status-dot" aria-hidden="true"></span>
+                        <div>
+                            <h2 id="profile-status-title" data-i18n="voiceIdentity.profileStatus">声纹状态</h2>
+                            <p id="voice-identity-profile-status" role="status"
+                                aria-live="polite" aria-atomic="true"
+                                data-i18n="voiceIdentity.profileMissing">尚未录入 Owner 声纹</p>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="enrollment-card" id="voice-identity-enrollment"
+                    aria-labelledby="voice-identity-enrollment-title">
+                    <div class="enrollment-copy">
+                        <p class="eyebrow" data-i18n="voiceIdentity.localOnly">仅在本机处理</p>
+                        <h2 id="voice-identity-enrollment-title" tabindex="-1"
+                            data-i18n="voiceIdentity.privacyTitle">说几句话，即可完成</h2>
+                        <p class="enrollment-help" data-i18n="voiceIdentity.privacyBody">
+                            点击后自然说话约 4 秒。声纹会加密保存在本机，不会发送给 ASR Provider，也不用于身份认证。
+                        </p>
+                    </div>
+                    <div class="capture-status" id="voice-identity-capture-status" hidden>
+                        <span class="record-icon" aria-hidden="true"></span>
+                        <span id="voice-identity-capture-label" data-i18n="voiceIdentity.recording">正在录音…</span>
+                        <span class="recording-timer" id="voice-identity-timer" aria-hidden="true"></span>
+                    </div>
+                    <div class="enrollment-actions">
+                        <button type="button" class="primary-button" id="voice-identity-start"
+                            data-i18n="voiceIdentity.enrollAndEnable">录入并启用声纹</button>
+                        <button type="button" class="secondary-button" id="voice-identity-cancel" hidden
+                            data-i18n="voiceIdentity.cancel">取消录入</button>
+                    </div>
+                    <p id="voice-identity-message" class="enrollment-message"
+                        role="status" aria-live="polite" aria-atomic="true"></p>
+                </section>
+
+                <section class="profile-card" id="voice-identity-profile-controls"
+                    aria-labelledby="voice-filter-title" hidden>
+                    <div class="filter-row">
+                        <div>
+                            <h2 id="voice-filter-title" data-i18n="voiceIdentity.filterLabel">Owner 声纹过滤</h2>
+                            <p id="voice-filter-help" data-i18n="voiceIdentity.filterHelp">
+                                仅作用于独立 ASR；短语音、不确定结果或检测异常都会正常放行。
+                            </p>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" id="voice-identity-filter"
+                                aria-labelledby="voice-filter-title"
+                                aria-describedby="voice-filter-help">
+                            <span class="switch-track" aria-hidden="true"></span>
+                        </label>
+                    </div>
+                    <div class="profile-actions">
+                        <button type="button" class="secondary-button" id="voice-identity-reenroll"
+                            data-i18n="voiceIdentity.reenroll">重新录入</button>
+                        <button type="button" class="danger-button" id="voice-identity-delete"
+                            data-i18n="voiceIdentity.delete">删除声纹</button>
+                    </div>
+                </section>
+            </div>
+        </div>
+    </main>
+</body>
+</html>

@@ -1,0 +1,347 @@
+/**
+ * API 相关类型定义
+ */
+
+// 通用响应结构
+export interface ApiResponse<T = any> {
+  success?: boolean
+  data?: T
+  message?: string
+  error?: string
+  time?: string
+}
+
+// 插件元数据
+export interface PluginAuthor {
+  name?: string
+  email?: string
+}
+
+export interface PluginDependency {
+  id?: string
+  entry?: string
+  custom_event?: string
+  providers?: string[]
+  recommended?: string
+  supported?: string
+  untested?: string
+  conflicts?: string[] | boolean
+}
+
+export type PluginType = 'plugin' | 'adapter'
+
+export type PluginListActionKind = 'builtin' | 'ui' | 'route' | 'url'
+
+export type PluginUiSurfaceKind = 'panel' | 'guide' | 'docs'
+export type PluginUiSurfaceMode = 'static' | 'hosted-tsx' | 'markdown' | 'auto'
+
+// `label` / `confirm_message` 与 backend `_normalize_plugin_list_action`
+// （plugin/server/application/plugins/ui_query_service.py）的 contract 对齐：
+// 既可以是字符串，也可以是 locale-keyed 字典（e.g.
+// `{"en-US": "Open UI", "zh-CN": "打开界面"}`）。后端的 `resolve_i18n_refs`
+// 只解析 `$i18n` ref，不会把 locale-keyed 字典拍平，所以这种 dict 会原样
+// 发到 frontend。展示时统一走 `utils/i18nLabel.ts` 的 `resolveLocalizedText`。
+export type LocalizedText = string | Record<string, string>
+
+export interface PluginListAction {
+  id: string
+  entry_id?: string
+  kind?: PluginListActionKind
+  label?: LocalizedText
+  description?: string
+  input_schema?: JSONSchema
+  icon?: string
+  tone?: string
+  group?: string | null
+  order?: number
+  confirm?: boolean | string
+  refresh_context?: boolean
+  target?: string
+  open_in?: 'new_tab' | 'same_tab'
+  confirm_message?: LocalizedText
+  confirm_mode?: 'dialog' | 'hold'
+  danger?: boolean
+  disabled?: boolean
+  requires_running?: boolean
+}
+
+export interface PluginUiSurface {
+  id: string
+  kind: PluginUiSurfaceKind
+  mode: PluginUiSurfaceMode
+  title?: string
+  entry?: string
+  url?: string
+  ui_path?: string
+  open_in?: 'iframe' | 'new_tab' | 'same_tab'
+  context?: string
+  permissions?: string[]
+  available?: boolean
+  /** Host-generated static/index.html surface retained for legacy UI compatibility. */
+  legacy_static_compat?: boolean
+}
+
+export interface PluginUiWarning {
+  path: string
+  code: string
+  message: string
+}
+
+export interface PluginUiContext {
+  plugin_id: string
+  kind: PluginUiSurfaceKind
+  surface_id: string
+  plugin: PluginMeta
+  surface: PluginUiSurface
+  state: Record<string, any>
+  state_schema?: JSONSchema | null
+  actions: PluginListAction[]
+  entries: PluginEntry[]
+  config: {
+    schema: JSONSchema
+    value: Record<string, any>
+    readonly?: boolean
+  }
+  warnings?: PluginUiWarning[]
+  i18n?: {
+    locale: string
+    default_locale?: string
+    messages?: Record<string, Record<string, string>>
+  }
+}
+
+export interface PluginUiInfo {
+  plugin_id: string
+  has_ui: boolean
+  explicitly_registered?: boolean
+  ui_path?: string | null
+  static_dir?: string | null
+  static_files?: string[]
+  static_files_count?: number
+}
+
+export interface PluginMeta {
+  id: string
+  name: string
+  type?: PluginType
+  description: string
+  short_description?: string
+  version: string
+  sdk_version?: string
+  sdk_recommended?: string
+  sdk_supported?: string
+  sdk_untested?: string
+  sdk_conflicts?: string[]
+  entries?: PluginEntry[]
+  runtime_enabled?: boolean
+  runtime_auto_start?: boolean
+  author?: PluginAuthor
+  dependencies?: PluginDependency[]
+  input_schema?: JSONSchema
+  i18n?: Record<string, any>
+  status?: string
+  list_actions?: PluginListAction[]
+  install_source?: PluginInstallSource
+}
+
+/**
+ * Install-source metadata attached by the backend's `_attach_install_source`
+ * injector. Matches the shape of `plugins.lock.json` entries (see
+ * `plugin.server.application.install_source.models`).
+ *
+ * `source` is always present and is one of:
+ *   - "builtin"  — shipped with the app
+ *   - "manual"   — user dropped the directory in by hand (or legacy entry)
+ *   - "imported" — installed via /plugin-cli/upload-and-install
+ *   - "market"   — installed via the plugin market bridge
+ *   - "unknown"  — manager unavailable / plugin not matched; treat as absent
+ */
+export type PluginInstallSourceChannel =
+  | 'builtin'
+  | 'manual'
+  | 'imported'
+  | 'market'
+  | 'unknown'
+
+export interface PluginInstallSourceDetailMarket {
+  plugin_market_id: string
+  version: string
+  /** v2 (neko-market-version-sync §3.1.1):
+   *  Market 的发布渠道。后端按 Pydantic ``Literal["stable", "beta"]`` 返回；
+   *  lock 解析失败时会回退到 ``"stable"``。前端代码把任何非 stable / beta
+   *  的字符串（含 ``undefined`` 转出来的容错值）统一映射为 ``"unknown"``，
+   *  这样 channel 的取值集合在 TypeScript 层面是封闭的，加新值时编译器
+   *  会强制检查所有消费点。具体收窄走 ``frontend/plugin-manager/src/utils/
+   *  narrowChannel.ts::narrowMarketChannel``。 */
+  channel?: 'stable' | 'beta' | 'unknown'
+  package_url: string
+  /** v2: Market 上分发的 .neko-plugin 包 sha256（64 hex）。v1 entry
+   *  parser 升上来时为空字符串。 */
+  package_sha256?: string
+  /** v2: 包内 metadata.toml [payload].hash；可能为 null。 */
+  payload_hash?: string | null
+  /** v2: Market 上 latest_version.created_at；v1 entry 升上来时回退到
+   *  entry.installed_at。 */
+  published_at?: string
+  previous_version: string | null
+}
+
+export interface PluginInstallSourceDetailImported {
+  package_filename: string
+  package_sha256: string
+}
+
+export type PluginInstallSourceDetail =
+  | PluginInstallSourceDetailMarket
+  | PluginInstallSourceDetailImported
+  | null
+
+export interface PluginInstallSource {
+  source: PluginInstallSourceChannel
+  reason: string | null
+  installed_at: string | null
+  source_detail: PluginInstallSourceDetail
+}
+
+// JSON Schema（简化版），用于描述插件入口参数
+export interface JSONSchemaProperty {
+  type?: string
+  description?: string
+  default?: any
+}
+
+export interface JSONSchema {
+  type?: string
+  properties?: Record<string, JSONSchemaProperty>
+  required?: string[]
+}
+
+// 插件入口点
+export interface PluginEntry {
+  id: string
+  name: string
+  description: string
+  input_schema?: JSONSchema
+  return_message?: string
+}
+
+// 插件状态
+export interface PluginStatusData {
+  plugin_id: string
+  status: {
+    status?: string
+    [key: string]: any
+  }
+  updated_at?: string
+  source?: string
+}
+
+// 插件健康检查
+export interface PluginHealth {
+  alive: boolean
+  exitcode?: number | null
+  pid?: number | null
+  status: 'running' | 'stopped' | 'crashed'
+  communication?: {
+    pending_requests?: number
+    consumer_running?: boolean
+  }
+}
+
+// 性能指标
+export interface PluginMetrics {
+  plugin_id: string
+  timestamp: string
+  pid?: number | null
+  cpu_percent: number
+  memory_mb: number
+  memory_percent: number
+  num_threads: number
+  total_executions?: number
+  successful_executions?: number
+  failed_executions?: number
+  avg_execution_time?: number
+  pending_requests?: number
+  queue_size?: number
+}
+
+// 插件消息
+export interface PluginMessage {
+  plugin_id: string
+  source: string
+  description: string
+  priority: number
+  message_type: 'text' | 'url' | 'binary' | 'binary_url'
+  content?: string
+  binary_data?: string
+  binary_url?: string
+  metadata?: Record<string, any>
+  timestamp: string
+  message_id: string
+}
+
+// 日志条目
+export interface LogEntry {
+  timestamp: string
+  level: string
+  file: string
+  line: number
+  message: string
+}
+
+// 日志文件信息
+export interface LogFile {
+  filename: string
+  size: number
+  modified: number
+}
+
+// 插件配置
+export interface PluginConfig {
+  plugin_id: string
+  config: Record<string, any>
+  last_modified: string
+  config_path?: string
+}
+
+// 服务器信息
+export interface ServerInfo {
+  sdk_version: string
+  plugins_count: number
+  time: string
+}
+
+// 全局性能指标
+export interface GlobalMetrics {
+  total_cpu_percent: number
+  total_memory_mb: number
+  total_memory_percent: number
+  total_threads: number
+  active_plugins: number
+}
+
+// 性能指标响应
+export interface MetricsResponse {
+  metrics: PluginMetrics[]
+  count: number
+  global?: GlobalMetrics
+  time: string
+}
+
+// 单个插件性能指标
+export interface PluginMetricsResult {
+  plugin_id: string
+  metrics: PluginMetrics | null
+  time: string
+  message?: string
+  plugin_running?: boolean
+  process_alive?: boolean
+}
+
+// 插件性能指标历史
+export interface PluginMetricsHistoryResult {
+  plugin_id: string
+  history: PluginMetrics[]
+  count: number
+  time: string
+}

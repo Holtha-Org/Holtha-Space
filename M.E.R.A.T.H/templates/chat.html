@@ -1,0 +1,1595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="UTF-8">
+    <title>N.E.K.O. Chat</title>
+
+    <!-- VRM 光照默认值：从后端注入，保证在所有 JS 之前同步可用 -->
+    <script>window.VRM_DEFAULT_LIGHTING=Object.freeze({{ vrm_defaults | tojson }});</script>
+    <!-- 诊断观测：必须最早加载（与 index.html 同序）。详见 static/debug-health.js。 -->
+    <script src="/static/debug-health.js?v={{ static_asset_version }}"></script>
+    <!-- 与 index.html 相同的基础 CSS/JS -->
+    <script src="/static/i18n-i18next.js?v={{ static_asset_version }}"></script>
+    <script src="/static/common_dialogs.js?v={{ static_asset_version }}"></script>
+    <link rel="stylesheet" href="/static/css/index.css?v={{ static_asset_version }}">
+    <link rel="stylesheet" href="/static/css/music_ui.css?v={{ static_asset_version }}">
+    <link rel="stylesheet" href="/static/css/subtitle.css?v={{ static_asset_version }}">
+    <link rel="stylesheet" href="/static/css/dark-mode.css?v={{ static_asset_version }}">
+    <script>window.__NEKO_REACT_CHAT_ASSET_VERSION__={{ react_chat_asset_version | tojson }};</script>
+    <link rel="stylesheet" href="/static/react/neko-chat/neko-chat-window.css?v={{ react_chat_asset_version }}">
+    <script src="/static/theme-manager.js?v={{ static_asset_version }}"></script>
+    <link rel="stylesheet" href="/static/libs/APlayer.min.css?v={{ static_asset_version }}">
+    <script src="/static/libs/APlayer.min.js?v={{ static_asset_version }}"></script>
+
+    <style>
+        /* 选择器加 :not(.lanlan-pet-mode) 把特异性抬到 (0,1,1)：兜浅色主题——
+           index.css 的手机端黑底 html:not(.lanlan-pet-mode) 同为 (0,1,1) 且不分
+           主题，浅色下也命中 chat 的 <html>（暗色反制是 dark-gated 不生效）；持平后
+           凭源序（本 <style> 晚于 index.css）取胜，使 <html> 浅色下也保持透明。
+           chat 窗口 html/body 从不带 lanlan-pet-mode，:not() 恒命中、不改适用范围。 */
+        html:not(.lanlan-pet-mode), body:not(.lanlan-pet-mode) {
+            margin: 0; padding: 0;
+            width: 100%; height: 100%;
+            background: transparent !important;
+            overflow: hidden;
+        }
+        /* Electron 独立窗口：overlay 充满窗口、当透明容器；内部 #react-chat-window-shell
+           走与首页共用的 compact 胶囊样式（static/css/index.css 里
+           body.subtitle-web-host #react-chat-window-shell[data-chat-surface-mode="compact"]
+           规则集，chat.html 的 <body> 带 subtitle-web-host 故自动命中）。 */
+        #react-chat-window-overlay {
+            position: fixed; inset: 0;
+            display: block !important;
+            background: transparent !important;
+        }
+        #react-chat-window-backdrop { display: none !important; }
+        /* Electron 缩/展窗期间主进程会先 setBounds，再由 renderer 收到 resize 后更新
+           React compact 几何。隐藏这段中间态，避免透明窗口左上角画出一帧旧布局。 */
+        body.neko-electron-runtime #react-chat-window-shell[data-chat-surface-mode="compact"].neko-e-animating {
+            visibility: hidden !important;
+        }
+        /* Electron 独立 full 窗口（part B）：full shell 改用「固定 30px inset 充满窗口」定位 +
+           收敛阴影，取代基础规则的 translate(-50%,-50%) 居中 + 0 30px 100px(~130px) 巨阴影。
+           两个目的：
+           (1) 阴影：基础巨阴影在「窗口≈内容」的独立窗口里会被窗口边缘大面积裁掉（"周围一圈阴影
+               被截断"）。收敛到能落在 30px inset 留白内。
+           (2) 展开飞出截断：b718b611 preload 的展开动画用 WAAPI 设 transform（替换掉 translate）、
+               结束设 shell.style.transform='none' —— 它假设 shell 不靠 transform 居中。与基础规则
+               的 translate 居中冲突 → 展开结束 translate 丢失，shell 左上角落到窗口中心、整块飞出
+               被截断。改用 inset 定位（不依赖 transform），展开全程及结束都正确贴窗、阴影留白稳定。
+           作用域：仅 Electron full 独立窗口、且非折叠球态（neko-e-collapsed）/非最小化（is-minimized）
+           —— 那两态有自己的定位/呼吸灯阴影；compact 窗口（attr=compact）走胶囊规则，均不受影响。 */
+        /* 玻璃流光特效复活（与上面同一门槛/选择器，合并为单块，避免重复声明）：
+           原 full 玻璃面板（液态边缘反光 + ::before 静态高光 + ::after 三色流光 liquidFlow）
+           在 #1594 退「共享 /chat 的 full 玻璃壳」时随整套 full 形态删除——根因是旧规则不带
+           data-chat-surface-mode 门槛，在共享 /chat 上先画空玻璃再塌成 compact（"先 full 再
+           compact" 闪帧）。现在 full 是独立窗口、带上面那组门槛（neko-electron-runtime +
+           attr=full + 非折叠/最小化），compact 与 web /chat_full（无运行时标记）都不命中，故可
+           安全复活。仅还原玻璃视觉，不复活旧版顶栏 chrome 与 #react-chat-window-root 渐隐 mask
+           （mask 会裁内容）；::before/::after 自带 22px 圆角裁住光斑，不动 shell overflow，避免
+           裁掉下拉/resize 把手。 */
+        body.neko-electron-runtime #react-chat-window-shell[data-chat-surface-mode="full"]:not(.is-minimized):not(.neko-e-collapsed) {
+            /* inset 充满窗口几何 */
+            top: 30px;
+            left: 30px;
+            right: 30px;
+            bottom: 30px;
+            width: auto;
+            height: auto;
+            max-width: none;
+            max-height: none;
+            transform: none;
+            border-radius: 22px;
+            /* 液态边缘反光 — 顶部最亮、左次之，模拟顶光 */
+            border-top: 2px solid rgba(255, 255, 255, calc(0.7 * var(--neko-chat-opacity-factor, 1)));
+            border-left: 1px solid rgba(255, 255, 255, calc(0.35 * var(--neko-chat-opacity-factor, 1)));
+            border-right: 1px solid rgba(255, 255, 255, calc(0.15 * var(--neko-chat-opacity-factor, 1)));
+            border-bottom: 1px solid rgba(255, 255, 255, calc(0.06 * var(--neko-chat-opacity-factor, 1)));
+            /* 收敛外阴影（落在 30px inset 留白内，不被窗口边缘裁掉）+ 玻璃内高光带 */
+            box-shadow:
+                0 8px 20px rgba(12, 20, 34, 0.28),
+                inset 0 2px 4px rgba(255, 255, 255, calc(0.5 * var(--neko-chat-opacity-factor, 1))),
+                inset 0 -1px 2px rgba(255, 255, 255, calc(0.08 * var(--neko-chat-opacity-factor, 1)));
+        }
+        /* 三色流光关键帧：7 个径向光斑各自缓慢漂移，模拟玻璃折射 */
+        @keyframes liquidFlow {
+            0%    { background-position:   0%   0%,  80%  10%,  40%  30%,  90%  50%,  20%  70%,  60%  85%,  95%  90%; }
+            12%   { background-position:  50%  15%,  20%  60%,  80%  10%,  40%  80%,  70%   5%,  10%  50%,  55%  35%; }
+            25%   { background-position:  90%  55%,  50%  90%,  15%  65%,  75%  20%,  45%  85%,  85%  15%,  20%  70%; }
+            38%   { background-position:  30%  85%,  85%  30%,  60%  95%,  10%  45%,  90%  40%,  40%  70%,  70%  10%; }
+            50%   { background-position:  70%  40%,  10%  75%,  95%  20%,  55%  90%,  15%  30%,  75%  55%,  35%  80%; }
+            63%   { background-position:  15%  70%,  65%  15%,  30%  50%,  85%  65%,  55%  95%,  25%  25%,  80%  50%; }
+            75%   { background-position:  80%  25%,  35%  85%,  70%  40%,  20%  10%,  85%  60%,  50%  90%,  10%  30%; }
+            88%   { background-position:  45%  90%,  90%  45%,  10%  75%,  60%  35%,  30%  50%,  80%  10%,  50%  65%; }
+            100%  { background-position:   0%   0%,  80%  10%,  40%  30%,  90%  50%,  20%  70%,  60%  85%,  95%  90%; }
+        }
+        /* 静态边缘高光层 — 在内容之下（z-index:0），顶部弧形高光 + 四边内高光 */
+        body.neko-electron-runtime #react-chat-window-shell[data-chat-surface-mode="full"]:not(.is-minimized):not(.neko-e-collapsed)::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            border-radius: 22px;
+            pointer-events: none;
+            z-index: 0;
+            box-shadow:
+                inset 0 2px 6px rgba(255, 255, 255, calc(0.5 * var(--neko-chat-opacity-factor, 1))),
+                inset 0 -1px 3px rgba(255, 255, 255, calc(0.1 * var(--neko-chat-opacity-factor, 1))),
+                inset 2px 0 4px rgba(255, 255, 255, calc(0.15 * var(--neko-chat-opacity-factor, 1))),
+                inset -2px 0 4px rgba(255, 255, 255, calc(0.08 * var(--neko-chat-opacity-factor, 1)));
+            background: linear-gradient(
+                180deg,
+                rgba(255, 255, 255, calc(0.25 * var(--neko-chat-opacity-factor, 1))) 0%,
+                rgba(255, 255, 255, calc(0.08 * var(--neko-chat-opacity-factor, 1))) 8%,
+                transparent 20%,
+                transparent 85%,
+                rgba(255, 255, 255, calc(0.04 * var(--neko-chat-opacity-factor, 1))) 100%
+            );
+        }
+        /* 三色流光层 — 三色径向渐变缓慢漂移，模拟玻璃折射（z-index:10，输入区 z-index:15
+           盖在其上，pointer-events:none 不挡交互）。用 background-image 而非简写，避免锁死
+           background-position 让 liquidFlow 动不起来。 */
+        body.neko-electron-runtime #react-chat-window-shell[data-chat-surface-mode="full"]:not(.is-minimized):not(.neko-e-collapsed)::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            border-radius: 22px;
+            pointer-events: none;
+            z-index: 10;
+            background-image:
+                radial-gradient(circle at 15% 10%, rgba(100,180,255,calc(0.14 * var(--neko-chat-opacity-factor, 1))) 0%, transparent 22%),
+                radial-gradient(circle at 75% 15%, rgba(180,140,255,calc(0.11 * var(--neko-chat-opacity-factor, 1))) 0%, transparent 20%),
+                radial-gradient(circle at 40% 35%, rgba(220,140,240,calc(0.12 * var(--neko-chat-opacity-factor, 1))) 0%, transparent 18%),
+                radial-gradient(circle at 85% 50%, rgba(120,200,255,calc(0.13 * var(--neko-chat-opacity-factor, 1))) 0%, transparent 20%),
+                radial-gradient(circle at 25% 65%, rgba(200,160,255,calc(0.10 * var(--neko-chat-opacity-factor, 1))) 0%, transparent 19%),
+                radial-gradient(circle at 60% 80%, rgba(100,190,255,calc(0.12 * var(--neko-chat-opacity-factor, 1))) 0%, transparent 21%),
+                radial-gradient(circle at 90% 85%, rgba(240,150,200,calc(0.10 * var(--neko-chat-opacity-factor, 1))) 0%, transparent 17%);
+            background-size: 200% 200%, 200% 200%, 200% 200%, 200% 200%, 200% 200%, 200% 200%, 200% 200%;
+            background-repeat: no-repeat;
+            animation: liquidFlow 20s ease-in-out infinite;
+        }
+        /* 尊重系统「减少动态」：停掉流光漂移，仅保留静态玻璃层（::before + 边框高光）。 */
+        @media (prefers-reduced-motion: reduce) {
+            body.neko-electron-runtime #react-chat-window-shell[data-chat-surface-mode="full"]:not(.is-minimized):not(.neko-e-collapsed)::after {
+                animation: none;
+            }
+        }
+        /* 玻璃边缘渐隐 mask 复活（与 ::before/::after 完全相同的 full gate）：把不透明聊天内容
+           （.chat-body 是 rgba(255,255,255,0.91)，近乎实心白）在四边窄带淡出，露出底下 z-index:0
+           的 ::before 静态高光层与 shell 反光边框 —— 这正是「玻璃」观感的本体。#1695 只复活了浮在
+           最上层（z-index:10）的 ::after 流光，::before 高光层被不透明内容整块盖住，故当时「只有
+           流光、没有玻璃」。补回这层 mask 让内容边缘让位、高光透出，玻璃才回来。
+           与裸选择器的旧版（#1594 因无门槛、在共享 /chat 上 React 挂载前先画 → 闪帧而删）不同：
+           这里挂在 full gate 下，compact（attr=compact）与 web /chat_full（无 neko-electron-runtime）
+           都不命中，结构上不可能在共享路径复现闪帧。
+           裁切顾虑：resize 把手 #neko-resize-handle 在 #react-chat-window-root 之外、不受 mask 影响；
+           顶 50 / 侧 12 / 底 16px 均为内容空 padding，淡出带落 padding 上不碰文字。底边收到 6px 且
+           更轻（终点 alpha 0.8 而非旧版 0.6），避免最后一行/滚动条发虚。 */
+        body.neko-electron-runtime #react-chat-window-shell[data-chat-surface-mode="full"]:not(.is-minimized):not(.neko-e-collapsed) #react-chat-window-root {
+            -webkit-mask-image:
+                linear-gradient(to bottom, rgba(0,0,0,0.3) 0px, black 10px, black calc(100% - 6px), rgba(0,0,0,0.8) 100%),
+                linear-gradient(to right, rgba(0,0,0,0.4) 0px, black 8px, black calc(100% - 8px), rgba(0,0,0,0.4) 100%);
+            -webkit-mask-composite: source-in;
+            mask-image:
+                linear-gradient(to bottom, rgba(0,0,0,0.3) 0px, black 10px, black calc(100% - 6px), rgba(0,0,0,0.8) 100%),
+                linear-gradient(to right, rgba(0,0,0,0.4) 0px, black 8px, black calc(100% - 8px), rgba(0,0,0,0.4) 100%);
+            mask-composite: intersect;
+        }
+        /* 顶栏半透明玻璃（同期 1afbc8d1d 实现：rgba 0.35，比 styles.css 默认 0.75 更透；配
+           styles.css 自带的 blur(48px) 成磨砂条）。#1695 漏了这层 → 顶栏偏实、「玻璃半透明」
+           观感缺失。只覆写背景、不动 styles.css 的 54px 高度/布局（不复活旧版 45px 顶栏 chrome）。
+           注：full 窗口 transparent:true 且同期 lanlan_frd 无 vibrancy/acrylic（已核 git 全史），
+           桌面是锐透出来的、非 OS 磨砂 —— 与当年一致，纯 CSS 半透明，无需 lanlan_frd 配合。 */
+        body.neko-electron-runtime #react-chat-window-shell[data-chat-surface-mode="full"]:not(.is-minimized):not(.neko-e-collapsed) .window-topbar {
+            background: rgba(255, 255, 255, calc(0.35 * var(--neko-chat-opacity-factor, 1) + 0.3 * max(0, var(--neko-chat-opacity-factor, 1) - 1)));
+        }
+        [data-theme="dark"] body.neko-electron-runtime #react-chat-window-shell[data-chat-surface-mode="full"]:not(.is-minimized):not(.neko-e-collapsed) .window-topbar {
+            background: rgba(50, 50, 72, calc(0.35 * var(--neko-chat-opacity-factor, 1) + 0.3 * max(0, var(--neko-chat-opacity-factor, 1) - 1)));
+        }
+        /* ──────────────────────────────────────────────────────────────────────
+           full 形态在**共享 /chat（compact）**上不注入，仅在此留档：
+           旧版在这里把 #react-chat-window-shell 钉成 inset:40px 的全窗口玻璃面板
+           （磨砂背景 / 四边反光边框 / 外阴影 + ::before 静态高光 + ::after 流光动画
+           + 顶栏 chrome + #react-chat-window-root 四边渐隐 mask）。因为这些规则不带
+           data-chat-surface-mode 门槛、且 overlay 又不是 hidden，页面一加载、React 还
+           没挂载时就会先画出这块空的全窗口玻璃面板，挂载后才塌成 compact —— 就是
+           "先 full 再 compact" 的那一帧。现在 compact 直接复用 index.css 的胶囊规则
+           （透明壳 + 隐藏顶栏按钮 + 无 ::before/::after 玻璃层）——共享 /chat 这条路径
+           仍不注入任何 full 形态样式/动画/mask。玻璃流光只在上方带门槛的 Electron full
+           独立窗口（neko-electron-runtime + attr=full）复活，两者互不影响。
+           ────────────────────────────────────────────────────────────────────── */
+        body.yui-guide-chat-buttons-disabled #react-chat-window-shell button,
+        body.yui-guide-chat-buttons-disabled #toggle-chat-btn {
+            pointer-events: none !important;
+        }
+        body.yui-guide-chat-buttons-disabled #react-chat-window-shell .composer-panel,
+        body.yui-guide-chat-buttons-disabled #react-chat-window-shell .composer-input-shell,
+        body.yui-guide-chat-buttons-disabled #react-chat-window-shell .composer-input,
+        body.yui-guide-chat-buttons-disabled #text-input-area,
+        body.yui-guide-chat-buttons-disabled #textInputBox,
+        body.yui-guide-chat-buttons-disabled #neko-resize-handle,
+        body.yui-guide-chat-buttons-disabled #react-chat-window-shell .react-chat-resize-edge {
+            pointer-events: none !important;
+        }
+        body.yui-guide-chat-buttons-disabled #react-chat-window-shell .composer-input,
+        body.yui-guide-chat-buttons-disabled #textInputBox,
+        body.yui-guide-chat-buttons-disabled #toggle-chat-btn {
+            caret-color: transparent !important;
+            user-select: none !important;
+        }
+        /* Chat 字体优化（覆盖 6 语：中简/繁/英/日/韩/俄） */
+        #react-chat-window-root {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter',
+                         'Noto Sans', 'PingFang SC', 'Microsoft YaHei',
+                         'Hiragino Sans', 'Malgun Gothic', sans-serif !important;
+            font-weight: 400 !important;
+        }
+        /* full 形态的暗色顶栏底、is-collapsing/is-expanding/is-minimized 全窗口几何复位仍随旧
+           full 形态退环境（compact 态的最小化/折叠/展开几何由 index.css 的 subtitle-web-host
+           规则统一负责）。注：liquidFlow 玻璃流光关键帧、shell 的 ::before/::after 玻璃层、以及
+           #react-chat-window-root 四边渐隐 mask 均已在上方带门槛复活（仅 Electron full 独立窗口），
+           lightSweep 因从未被 animation 引用未恢复。 */
+        /* 输入区提到光晕层之上，保持原始不透明度 */
+        .composer-panel {
+            position: relative !important;
+            z-index: 15 !important;
+        }
+        /* 输入框描边加粗 */
+        .composer-input-shell {
+            border: 1.5px solid rgba(127, 144, 170, 0.25) !important;
+        }
+        /* placeholder 样式：淡色小字 */
+        .composer-input::placeholder {
+            color: rgba(102, 117, 141, 0.5) !important;
+            font-size: 0.85em !important;
+        }
+        /* 消息气泡进场动效 —— 由 neko-chat-window.css 统一定义，此处不重复声明。
+           旧版在此处用 !important 重复声明 @keyframes + animation 规则，会导致浏览器
+           对同名 @keyframes 做二次解析，且 !important 阻止 prefers-reduced-motion
+           等未来覆盖，已移除。 */
+
+        /* GalGame 模式：撑高窗口和外壳，预留 A/B/C 一来就有位置，避免
+           jump-resize；输入壳本身不再硬撑 min-height，由 .composer-galgame-slot
+           的 max-height 过渡驱动自然长高，参见 react-neko-chat styles.css。 */
+        body.galgame-mode-enabled #react-chat-window-shell {
+            min-height: 320px !important;
+        }
+        body.galgame-mode-enabled {
+            min-height: 385px !important;
+        }
+
+        /* 附件预览（截图 / 导入图片）兜底：.composer-attachments 是 90px 的
+           卡片行 + ~20px 内边距/间距，会在 .composer-panel grid 里顶在 input-shell
+           之上。窗口偏小时 input-shell 整块被推出可视区，用户点不到也敲不了字。
+           身上贴 composer-has-attachments 时直接抬高 shell/body 兜住附件 + input
+           的总高度（385 ≈ chat-body 留白 + 90 附件 + ~190 输入区）。 */
+        body.composer-has-attachments #react-chat-window-shell {
+            min-height: 320px !important;
+        }
+        body.composer-has-attachments {
+            min-height: 385px !important;
+        }
+        /* GalGame + 附件并存的极端情况：两个兜底叠加，否则 attachments 仍能
+           吃掉 galgame slot 的 ~110px 预算把输入区顶出。直接拉到 495px 让
+           A/B/C + 附件 + 输入框三件套同屏可见。 */
+        body.galgame-mode-enabled.composer-has-attachments #react-chat-window-shell {
+            min-height: 430px !important;
+        }
+        body.galgame-mode-enabled.composer-has-attachments {
+            min-height: 495px !important;
+        }
+
+        /* Electron 独立窗口始终显示全部工具按钮（覆盖 index.css 768px 媒体查询隐藏） */
+        #react-chat-window-shell .composer-bottom-tools > .composer-tool-btn:last-child {
+            display: inline-flex !important;
+        }
+        #react-chat-window-shell .composer-bottom-tools > .composer-tool-divider:nth-last-child(2) {
+            display: inline !important;
+        }
+        /* 隐藏旧版 chat */
+        #chat-container { display: none !important; }
+        /* 旧版 chat 样式保留但不激活（app-*.js 的 getElementById 依赖 DOM 存在）*/
+        /*chat-container 填满窗口（窗口大小由 JS 控制）*/
+        .legacy-chat-style #chat-container {
+            position: fixed !important;
+            left: 0 !important; top: 0 !important;
+            width: 100% !important; height: 100% !important;
+            max-height: 100% !important;
+            border: none !important; margin: 0 !important;
+            bottom: auto !important; right: auto !important;
+            /* 独立窗口容器始终 100%，禁用 index.css 的 width/height 过渡
+               —— 否则 setBounds 缩窗时容器会动画延迟跟随，导致跳变 */
+            transition: box-shadow 0.2s ease, transform 0.32s ease !important;
+        }
+        #chat-container::before { border-radius: 8px !important; }
+        #chat-header { cursor: grab; user-select: none; }
+
+        /* 折叠态毛线球 */
+        #chat-container.minimized {
+            width: 51px !important; height: 51px !important;
+            max-height: 51px !important; min-width: 0 !important; min-height: 0 !important;
+            border-radius: 50% !important;
+            background: transparent image-set(url('/static/assets/neko-idle/chat-minimized-yarn-ball-116.png?v={{ static_asset_version }}') 1x, url('/static/assets/neko-idle/chat-minimized-yarn-ball-232.png?v={{ static_asset_version }}') 2x) center / contain no-repeat !important;
+            box-shadow: none !important;
+            animation: none !important;
+            cursor: pointer !important;
+            image-rendering: auto !important;
+            left: 50% !important; top: 50% !important;
+            transform: translate(-50%, -50%) !important;
+            overflow: visible !important;
+        }
+        /* 折叠态禁用原生拖拽，改用 JS 手动拖拽 + 点击展开 */
+        #chat-container.minimized,
+        #chat-container.minimized * {
+            -webkit-app-region: no-drag !important;
+        }
+        /* 折叠球拖拽中：禁用呼吸动画和 box-shadow，减少透明窗口 setBounds 重绘开销 */
+        #chat-container.minimized.dragging {
+            animation: none !important;
+            box-shadow: none !important;
+            transition: none !important;
+        }
+        #chat-container.minimized::before {
+            border-radius: 50% !important;
+            background: transparent !important;
+        }
+
+        /* resize 手柄 */
+        #neko-resize-handle {
+            position: absolute; right: 2px; bottom: 2px;
+            width: 16px; height: 16px; z-index: 100;
+            cursor: nwse-resize; opacity: 0.7; pointer-events: auto;
+            background-image: linear-gradient(135deg,
+                transparent 0 35%, rgba(68,183,254,.42) 35% 43%,
+                transparent 43% 52%, rgba(68,183,254,.58) 52% 60%,
+                transparent 60% 70%, rgba(68,183,254,.78) 70% 78%,
+                transparent 78% 100%);
+        }
+        #neko-resize-handle:hover { opacity: 1; }
+
+        /* 暗色模式透明背景覆盖 —— dark-mode.css / index.css 的 max-width:768px
+           媒体查询会将 html/body 背景设为 #000，但 chat 窗口宽度 400px 始终命中。
+           #1573 给那两条黑底加了 :not(.lanlan-pet-mode)（特异性 0,2,x），压过了
+           原本 0,1,x 的反制，导致透明窗口背景变黑、圆角外围显示黑色矩形。
+           这里同步加 :not(.lanlan-pet-mode) 把反制抬到 0,2,x：与黑底特异性持平，
+           再凭源序（本 <style> 晚于两张表）取胜，使 html 行与 body 行都赢过黑底。
+           chat 窗口 html/body 从不带 lanlan-pet-mode，:not() 恒命中、不改适用范围。 */
+        html[data-theme="dark"]:not(.lanlan-pet-mode),
+        html[data-theme="dark"]:not(.lanlan-pet-mode) body {
+            background: transparent !important;
+        }
+
+        /* resize 期间：CSS 变量即时跟随鼠标，min() 确保不超过 viewport 防止裁切
+           —— 缩小时 CSS 变量 < viewport → 即时生效；放大时 CSS 变量 > viewport → 钳位到 100vw/vh，等 setBounds 追上 */
+        html.neko-resizing #chat-container {
+            width: min(var(--neko-resize-w, 100%), 100vw) !important;
+            height: min(var(--neko-resize-h, 100%), 100vh) !important;
+            max-height: min(var(--neko-resize-h, 100%), 100vh) !important;
+            transition: none !important;
+        }
+        html.neko-resizing #chat-container::before {
+            /* 禁用 backdrop-filter 大幅减少 resize 期间 GPU 重绘压力 */
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+            transition: none !important;
+        }
+        html.neko-resizing #chat-content-wrapper {
+            scroll-behavior: auto !important;
+        }
+
+        /* 折叠动画：缩小 + 淡出 */
+        #chat-container.neko-collapsing {
+            transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1),
+                        opacity 0.28s ease !important;
+            transform-origin: left bottom !important;
+            transform: scale(0.12) !important;
+            opacity: 0 !important;
+            pointer-events: none !important;
+            overflow: hidden !important;
+        }
+        /* 展开动画起始态 */
+        #chat-container.neko-expand-start {
+            transform: scale(0.12) !important;
+            opacity: 0 !important;
+            transition: none !important;
+            pointer-events: none !important;
+        }
+        /* 展开动画目标态 */
+        #chat-container.neko-expanding {
+            transform: scale(1) !important;
+            opacity: 1 !important;
+            transition: transform 0.28s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                        opacity 0.28s ease !important;
+            transform-origin: left bottom !important;
+            pointer-events: none !important;
+        }
+
+        /* 独立窗口始终使用桌面样式，屏蔽 index.css / dark-mode.css 768px 移动端媒体查询
+           —— 300px 缓冲扩展策略会使 viewport 跨越 768px 断点，导致布局跳变 */
+        #chat-header {
+            height: 48px !important;
+            font-size: inherit !important;
+        }
+        #chat-content-wrapper {
+            padding: 16px !important;
+            padding-top: 48px !important;
+            background: rgba(249, 249, 249, 0.7) !important;
+        }
+        #text-input-area {
+            padding: 12px !important;
+            background: rgba(255, 255, 255, 0.5) !important;
+            /* 禁用 index.css 的 transition: all 0.3s，避免 resize 时布局动画 */
+            transition: none !important;
+        }
+        #textInputBox {
+            height: 102px !important;
+        }
+        #button-group {
+            gap: 6px !important;
+        }
+        #textSendButton,
+        #screenshotButton {
+            padding: 8px 16px !important;
+            font-size: inherit !important;
+            min-width: auto !important;
+        }
+        /* 暗色模式同理（桌面默认值：dark-mode.css line 146, 172）*/
+        [data-theme="dark"] #chat-content-wrapper {
+            background: rgba(25, 25, 25, 0.8) !important;
+        }
+        [data-theme="dark"] #text-input-area {
+            background: rgba(40, 40, 40, 0.65) !important;
+        }
+    </style>
+</head>
+<body class="electron-chat-window subtitle-web-host"
+      data-chat-host-kind="{{ initial_chat_host_kind|default('compact', true) }}"
+      data-initial-chat-surface-mode="{{ initial_chat_surface_mode|default('compact', true) }}">
+
+    <!-- Electron 运行时标记：/chat_full 与 /chat 共用本模板，body.electron-chat-window 是静态写入，
+         浏览器访问 web /chat_full 时也会带它 —— 故「仅 Electron 独立窗口」的样式（如 full 30px inset
+         布局）不能用它做门禁，必须用运行时信号：preload 注入的 window.nekoChatWindow（compact/full
+         两个 chat preload 都暴露）/ Electron UA / process.versions.electron。preload 在页面脚本之前
+         注入，这里同步可读；内容 overlay 默认 hidden 到 React 挂载，class 早已就位，无闪。dev 浏览器
+         无这些信号 → 不打标记，full 退回 base 居中。对偶 index.html 头部的 __LANLAN_IS_ELECTRON_PET__。 -->
+    <script>(function () {
+        try {
+            var w = window;
+            var isElectronRuntime = !!w.nekoChatWindow
+                || /Electron/i.test(navigator.userAgent || '')
+                || !!(w.process && w.process.versions && w.process.versions.electron);
+            if (isElectronRuntime) {
+                document.body.classList.add('neko-electron-runtime');
+            }
+        } catch (e) { /* 检测失败按非 Electron 处理，full 退回浏览器 base 居中 */ }
+    })();</script>
+
+    <div id="status-toast"></div>
+    <!-- 空壳 DOM：防止 app-ui / app-websocket.js 中 getElementById 返回 null -->
+    <div id="live2d-container" style="display:none;"><canvas id="live2d-canvas"></canvas></div>
+    <div id="vrm-container" style="display:none;"><canvas id="vrm-canvas"></canvas></div>
+    <div id="subtitle-display" class="hidden" style="display:none;"><span id="subtitle-text"></span></div>
+
+    <!-- 与 index.html 完全相同的 chat DOM -->
+    <div id="chat-container">
+        <div id="chat-header">
+            <img src="/static/icons/chat_icon.png" data-i18n-alt="chat.title" alt="对话"
+                style="width:28px;height:28px;object-fit:contain;margin-right:6px;vertical-align:middle;image-rendering:-webkit-optimize-contrast;image-rendering:crisp-edges;">
+            <span id="chat-title" data-i18n="chat.title">対話</span>
+        </div>
+        <button id="toggle-chat-btn" data-i18n-title="common.minimize" title="最小化"><img
+                src='/static/icons/expand_icon_off.png' alt="最小化" data-i18n-alt="common.minimize"
+                width="32" height="32" style="object-fit:cover;pointer-events:none;"></button>
+        <div id="chat-tooltip" data-i18n="chat.tooltip">✨ 対話区</div>
+        <div id="chat-content-wrapper">
+            <div id="chatContainer"></div>
+        </div>
+        <div id="text-input-area">
+            <div id="screenshot-thumbnail-container">
+                <div id="screenshots-header">
+                    <span id="screenshots-title" data-i18n="chat.screenshotsTitle">📸 待发送截图</span><span
+                        id="screenshot-count-wrapper"> (<span id="screenshot-count">0</span>)</span>
+                    <button id="clear-all-screenshots" data-i18n="chat.clearAll">清空全部</button>
+                </div>
+                <div id="screenshots-list"></div>
+            </div>
+            <div id="text-input-row">
+                <textarea id="textInputBox" data-i18n-placeholder="chat.textInputPlaceholder"
+                    placeholder="文字聊天模式...回车发送，Shift+回车换行" tabindex="0"></textarea>
+                <div id="button-group">
+                    <button id="textSendButton"><img src="/static/icons/send_icon.png" alt=""><span
+                            data-i18n="chat.send">发送</span></button>
+                    <button id="screenshotButton"><img src="/static/icons/chat_shot.png" alt=""><span
+                            class="desktop-text" data-i18n="chat.screenshot">截图</span><span class="mobile-text"
+                            data-i18n="chat.takePhoto">拍照</span></button>
+                </div>
+            </div>
+        </div>
+        <div id="neko-resize-handle"></div>
+    </div>
+
+    <!--
+        ⚠️ 以下按钮永远不会显示，但绝对不能删除！
+        JS 层（app-buttons.js / app-websocket.js / app-screen.js 等）通过
+        getElementById 获取这些元素的引用，用来：
+          1. 绑定 click 事件 → 触发 WebSocket 后端调用（start_session / end_session / stream_data）
+          2. 读写 disabled / active / recording 等状态 → 判断当前会话模式
+        删除这些元素会导致 getElementById 返回 null，所有语音、屏幕共享、会话管理功能静默失败。
+        因为用户永远看不到这些按钮，所以也不需要做 i18n 翻译。
+    -->
+    <div id="sidebar" style="display:none;">
+        <button id="micButton">开始语音</button>
+        <button id="muteButton" disabled>暂停</button>
+        <button id="screenButton" disabled>屏幕</button>
+        <button id="stopButton" disabled>停止</button>
+        <button id="resetSessionButton">重置</button>
+        <button id="returnSessionButton">返回</button>
+    </div>
+
+    <!-- React Chat（与 index.html 完全相同的 DOM 结构）-->
+    <!-- overlay 默认 hidden（与 index.html 一致）：在 React 挂载完成、shell 已带
+         data-chat-surface-mode="compact" 之前不渲染任何东西，避免先闪一帧 full 形态。
+         app-react-chat-window 的 openWindow() 会在 mountWindow() 之后置 hidden=false。 -->
+    <div id="react-chat-window-overlay" hidden>
+        <div id="react-chat-window-backdrop"></div>
+        <div id="react-chat-window-shell" role="dialog" aria-modal="true" aria-labelledby="react-chat-window-title">
+            <div id="react-chat-window-drag-handle" aria-hidden="true"></div>
+            <div id="react-chat-window-header-actions">
+                <button id="avatarPreviewHeaderButton" type="button"
+                        data-i18n-aria="chat.avatarPreview"
+                        data-i18n-title="chat.avatarPreview"
+                        aria-label="头像" title="头像">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M12 12a3.75 3.75 0 1 0 0-7.5 3.75 3.75 0 0 0 0 7.5Z" />
+                        <path d="M5.5 19.25a6.5 6.5 0 0 1 13 0" />
+                    </svg>
+                </button>
+                <button id="exportConversationButton" type="button"
+                        data-i18n-aria="chat.exportConversation"
+                        data-i18n-title="chat.exportConversation"
+                        aria-label="导出对话" title="导出对话">
+                    <img src="/static/icons/fenxiang.svg" alt="" aria-hidden="true" width="20" height="20">
+                </button>
+                <button id="reactChatWindowMinimizeButton" type="button" data-i18n-aria="chat.reactWindowMinimize" data-i18n-title="chat.reactWindowMinimize">
+                    <img id="reactChatWindowMinimizeIcon" src="/static/icons/expand_icon_off.png" data-i18n-alt="chat.reactWindowMinimize" alt="最小化聊天框" width="32" height="32">
+                </button>
+                <button id="reactChatWindowCloseButton" type="button" data-i18n-aria="chat.reactWindowClose" data-i18n-title="chat.reactWindowClose">×</button>
+            </div>
+            <div id="react-chat-window-root"></div>
+        </div>
+    </div>
+
+    <!-- 独立头像预览弹窗（chat.html / index.html 共用）-->
+    <div id="chat-avatar-preview-popup" class="chat-avatar-preview-popup" role="dialog" aria-modal="false" aria-labelledby="chat-avatar-preview-popup-title" hidden>
+        <div class="chat-avatar-preview-card-header">
+            <div class="chat-avatar-preview-card-title-group">
+                <div id="chat-avatar-preview-popup-title" class="chat-avatar-preview-card-title" data-i18n="chat.avatarPreviewCardTitle">当前头像</div>
+                <div id="chat-avatar-preview-status" class="chat-avatar-preview-card-status" data-i18n="chat.avatarPreviewCardStatus">点击上方按钮生成当前模型头像</div>
+            </div>
+            <button id="chatAvatarPreviewCloseButton" class="chat-avatar-preview-card-close" type="button" data-i18n-title="chat.avatarPreviewClose" data-i18n-aria="chat.avatarPreviewClose" aria-label="关闭头像预览">×</button>
+        </div>
+        <div class="chat-avatar-preview-card-body">
+            <div id="chat-avatar-preview-image-shell" class="chat-avatar-preview-image-shell is-empty">
+                <img id="chat-avatar-preview-image" class="chat-avatar-preview-image" data-i18n-alt="chat.avatarPreviewImageAlt" alt="当前头像预览" hidden>
+                <div id="chat-avatar-preview-placeholder" class="chat-avatar-preview-placeholder" data-i18n="chat.avatarPreviewPlaceholder">AVATAR</div>
+            </div>
+            <div class="chat-avatar-preview-card-meta">
+                <div id="chat-avatar-preview-note" class="chat-avatar-preview-card-note" data-i18n="chat.avatarPreviewCardNote">将基于当前显示中的 Live2D / VRM / MMD 模型生成头像。</div>
+                <button id="chatAvatarPreviewRefreshButton" class="chat-avatar-preview-refresh-btn" type="button" data-i18n="chat.avatarPreviewRefresh">刷新头像</button>
+            </div>
+        </div>
+        <div class="chat-avatar-preview-crop-body">
+            <div class="avatar-cropper-area">
+                <div id="avatar-cropper-wrap" class="avatar-cropper-canvas-wrap">
+                    <img id="avatar-cropper-img" class="avatar-cropper-source-img" alt="">
+                    <svg id="avatar-cropper-mask" class="avatar-cropper-mask"></svg>
+                    <div id="avatar-cropper-box" class="avatar-cropper-crop-box">
+                        <div class="avatar-cropper-viewfinder">
+                            <div class="avatar-cropper-grid-line h1"></div>
+                            <div class="avatar-cropper-grid-line h2"></div>
+                            <div class="avatar-cropper-grid-line v1"></div>
+                            <div class="avatar-cropper-grid-line v2"></div>
+                            <div class="avatar-cropper-circle-guide"></div>
+                        </div>
+                        <div class="avatar-cropper-handle tl" data-handle="tl"></div>
+                        <div class="avatar-cropper-handle tr" data-handle="tr"></div>
+                        <div class="avatar-cropper-handle bl" data-handle="bl"></div>
+                        <div class="avatar-cropper-handle br" data-handle="br"></div>
+                    </div>
+                </div>
+                <div class="avatar-cropper-controls">
+                    <button class="avatar-cropper-ctrl-btn" data-crop-action="up" data-i18n-title="chat.avatarCropMoveUp" title="上移"><svg viewBox="0 0 16 16"><path d="M8 3L2 10h12z"/></svg></button>
+                    <div class="avatar-cropper-controls-row">
+                        <button class="avatar-cropper-ctrl-btn" data-crop-action="left" data-i18n-title="chat.avatarCropMoveLeft" title="左移"><svg viewBox="0 0 16 16"><path d="M3 8l7-6v12z"/></svg></button>
+                        <button class="avatar-cropper-ctrl-btn" data-crop-action="center" data-i18n-title="chat.avatarCropCenter" title="居中"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="3"/><path d="M8 1v3M8 12v3M1 8h3M12 8h3" stroke="currentColor" stroke-width="1.5" fill="none"/></svg></button>
+                        <button class="avatar-cropper-ctrl-btn" data-crop-action="right" data-i18n-title="chat.avatarCropMoveRight" title="右移"><svg viewBox="0 0 16 16"><path d="M13 8L6 2v12z"/></svg></button>
+                    </div>
+                    <button class="avatar-cropper-ctrl-btn" data-crop-action="down" data-i18n-title="chat.avatarCropMoveDown" title="下移"><svg viewBox="0 0 16 16"><path d="M8 13l6-7H2z"/></svg></button>
+                    <div class="avatar-cropper-ctrl-divider"></div>
+                    <button class="avatar-cropper-ctrl-btn" data-crop-action="bigger" data-i18n-title="chat.avatarCropZoomIn" title="放大"><svg viewBox="0 0 16 16"><path d="M3 8h10M8 3v10" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
+                    <button class="avatar-cropper-ctrl-btn" data-crop-action="smaller" data-i18n-title="chat.avatarCropZoomOut" title="缩小"><svg viewBox="0 0 16 16"><path d="M3 8h10" stroke="currentColor" stroke-width="2" fill="none"/></svg></button>
+                </div>
+            </div>
+            <div class="avatar-cropper-buttons">
+                <button id="avatar-cropper-retake" class="avatar-cropper-btn" type="button" data-i18n="chat.avatarCropRetake">重新拍照</button>
+                <div class="avatar-cropper-decision-buttons">
+                    <button id="avatar-cropper-cancel" class="avatar-cropper-btn" type="button" data-i18n="chat.avatarCropCancel">取消</button>
+                    <button id="avatar-cropper-save" class="avatar-cropper-btn primary" type="button" data-i18n="chat.avatarCropSave">保存</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 跳过：Live2D/VRM/Three.js、common_ui.js(DOM拖拽不兼容)、touch-config、tutorial -->
+    <script src="/static/libs/ogg-opus-decoder.min.js?v={{ static_asset_version }}"></script>
+    <script src="/static/jukebox/music_ui.js?v={{ static_asset_version }}"></script>
+    <!-- 点歌台门面：这一页也会收到 jukebox_control。多窗口分发下它会让位给主窗口，
+         但网页端单独开 /chat 时它就是唯一的收件人，没有门面就只能把 AI 发来的
+         点播指令整条丢掉（聊天窗自己的点歌台按钮同样是死的）。加载顺序与
+         index.html 保持一致：music_ui.js -> jukebox-loader.js -> index.js。 -->
+    <script src="/static/jukebox/jukebox-loader.js?v={{ static_asset_version }}"></script>
+    <script src="/static/js/index.js?v={{ static_asset_version }}"></script>
+    <!-- 不加载 common_ui.js：它的 DOM 拖拽/resize 和独立窗口不兼容 -->
+    <script src="/static/achievement_manager.js?v={{ static_asset_version }}"></script>
+    <script src="/static/js/agent_ui_v2.js?v={{ static_asset_version }}"></script>
+    <script src="/static/ogg-opus-decoder-wrapper.js?v={{ static_asset_version }}"></script>
+
+    <!-- app 模块（与 index.html 完全相同的加载顺序）-->
+    <script src="/static/app/desktop-capture-provider.js?v={{ static_asset_version }}"></script>
+    <script src="/static/subtitle/subtitle-shared.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-prompt-shared.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-state.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-cat-mind.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-cat-mind-debug.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-ui/bootstrap-goodbye-and-toasts.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-ui/model-display.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-ui/return-transitions.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-ui/return-window-drag.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-ui/surface-floating-controls.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-ui/wrapup-final-guards.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-chat-text-utils.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-chat.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-chat-avatar.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-audio-playback.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-widget-interaction.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-spatial-audio.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-audio-capture.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-screen.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-crop.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/guide-helpers.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/scoped-resources.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/bridge-command-bus.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/target-geometry-registry.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/chat-window-adapter.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/command-registry.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/script-normalizer.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/timeline-engine.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/core/visual-runtime.js?v={{ static_asset_version }}"></script>
+    <script src="/static/tutorial/yui-guide/common.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-interpage/bootstrap-resources-and-model-reload.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-interpage/composer-voice-sync.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-interpage/cross-window-broadcast-and-bridge.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-interpage/guide-message-relay.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-interpage/guide-overlay.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-interpage/guide-targets.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-interpage/listeners-and-api.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-proactive.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-settings.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-agent.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-character.js?v={{ static_asset_version }}"></script>
+    <!-- Match index.html: install the adapter before app.js opens the WebSocket. -->
+    <script src="/static/app/app-chat-adapter.js?v={{ react_chat_asset_version }}"></script>
+    <script src="/static/app/app-websocket.js?v={{ static_asset_version }}"></script>
+    <script src="/static/vrm/motion/bridge.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-telemetry.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app-buttons.js?v={{ react_chat_asset_version }}"></script>
+    <script src="/static/avatar/avatar-drop-parser.js?v={{ static_asset_version }}"></script>
+    <script src="/static/app/app.js?v={{ static_asset_version }}"></script>
+    <script src="/static/subtitle/subtitle.js?v={{ static_asset_version }}"></script>
+
+    <!-- React Chat（与 index.html 相同的 bundle + 初始化器）-->
+    <!-- Local-mutation CSRF helper：mini-game invite respond endpoint 等本地
+         mutation 共用 window.nekoLocalMutationSecurity 拿 X-CSRF-Token；必须
+         在 app-react-chat-window 之前加载，与 index.html 同序。 -->
+    <script src="/static/game/system/game-audio-system.js?v={{ static_asset_version }}"></script>
+    <script src="/static/react/neko-chat/neko-chat-window.iife.js?v={{ react_chat_asset_version }}"></script>
+    <script src="/static/app/app-react-chat-window/bootstrap-state-and-geometry.js?v={{ react_chat_asset_version }}"></script>
+    <script src="/static/app/app-react-chat-window/geometry-and-messages.js?v={{ react_chat_asset_version }}"></script>
+    <script src="/static/app/app-react-chat-window/message-bundle-actions-and-prompts.js?v={{ react_chat_asset_version }}"></script>
+    <script src="/static/app/app-react-chat-window/minimize-and-idle-dock.js?v={{ react_chat_asset_version }}"></script>
+    <script src="/static/app/app-react-chat-window/cat-local-chat-lexicon.js?v={{ react_chat_asset_version }}"></script>
+    <script src="/static/app/app-react-chat-window/cat-local-chat.js?v={{ react_chat_asset_version }}"></script>
+    <script src="/static/app/app-react-chat-window/resize-drag-and-api.js?v={{ react_chat_asset_version }}"></script>
+    <script src="/static/app/app-chat-export.js?v={{ static_asset_version }}"></script>
+
+    <script>
+    // =====================================================================
+    // 独立窗口：窗口级 resize / 折叠（拖拽由 -webkit-app-region: drag 原生处理）
+    // =====================================================================
+    (function() {
+        'use strict';
+        var W = window.nekoChatWindow;
+        if (!W) return;
+
+        var box = document.getElementById('chat-container');
+        var hdr = document.getElementById('chat-header');
+        var btn = document.getElementById('toggle-chat-btn');
+        var wrap = document.getElementById('chat-content-wrapper');
+        var tia = document.getElementById('text-input-area');
+        var rh  = document.getElementById('neko-resize-handle');
+        if (!box) return;
+
+        // BALL: 折叠态毛线球窗口总尺寸（CSS .minimized 51px 内容 + 32px Electron 窗口边框/透明余量）
+        var BALL = 83;
+        // NEKO-PC full 折叠由主进程落成 88×88；保留 2px DWM/缩放取整容差。
+        // 不能复用 BALL + 4（87），否则页面重载时会把真实 88px 球误判为展开窗口并撑高。
+        var ELECTRON_COLLAPSED_MAX_SIZE = 90;
+        var MIN_W = 300;
+        var MIN_H_BASE = 200;
+        // GalGame 模式开启时输入框需要额外 ~110px 容纳 A/B/C 选项 + 间距，
+        // 否则用户首次进入会看到选项被裁切到 send 按钮下方。
+        // GAL 模式的 320px 是内容壳最低高度；独立窗口还有 top/bottom inset，
+        // 需要把外层窗口最小高度抬高，否则压扁后输入区底部会被窗口裁掉。
+        var MIN_H_GALGAME = 385;
+        // 附件预览（截图 / 导入图片）也需要相同量级的兜底：单卡片 90px + 内边距，
+        // 没有兜底时窗口偏小附件会把 input-shell 推出可视区。和 galgame 同级（385）。
+        var MIN_H_ATTACHMENTS = 385;
+        // 极端情况：galgame slot 与附件预览并存。两份预算叠加（slot ~110 + 附件 ~110）。
+        var MIN_H_GALGAME_ATTACHMENTS = 495;
+        function isGalgameModeOn() {
+            return !!(document.body && document.body.classList.contains('galgame-mode-enabled'));
+        }
+        function hasComposerAttachments() {
+            return !!(document.body && document.body.classList.contains('composer-has-attachments'));
+        }
+        function currentMinH() {
+            var gal = isGalgameModeOn();
+            var att = hasComposerAttachments();
+            if (gal && att) return MIN_H_GALGAME_ATTACHMENTS;
+            if (gal) return MIN_H_GALGAME;
+            if (att) return MIN_H_ATTACHMENTS;
+            return MIN_H_BASE;
+        }
+        function isReactElectronCollapsed() {
+            var shell = document.getElementById('react-chat-window-shell');
+            return !!(shell && (
+                shell.classList.contains('neko-e-collapsed') ||
+                shell.classList.contains('neko-e-animating') ||
+                shell.classList.contains('is-minimized') ||
+                shell.classList.contains('is-collapsing') ||
+                shell.classList.contains('is-expanding')
+            ));
+        }
+        Object.defineProperty(window, '__nekoChatMinH', {
+            get: currentMinH,
+            configurable: true
+        });
+
+        // GalGame 模式开/关、或附件 0↔N 切换时，若当前窗口高度小于新最小值，
+        // 主动 setBounds 撑高，否则切到 ON / 贴上附件后会看到内容被窗口裁掉。
+        function syncWindowToMinH() {
+            if (collapsed || resizing || animating || isReactElectronCollapsed()) return;
+            var minH = currentMinH();
+            try {
+                W.getBounds().then(function(b) {
+                    if (!b) return;
+                    if (isReactElectronCollapsed()) return;
+                    if (b.width <= ELECTRON_COLLAPSED_MAX_SIZE && b.height <= ELECTRON_COLLAPSED_MAX_SIZE) return;
+                    if (b.height >= minH) return;
+                    W.setBounds(b.x, b.y, b.width, minH);
+                });
+            } catch (_) {}
+        }
+        // body class 由 app-react-chat-window 在 toggle 时刷新；这里订阅
+        // 主动同步事件，避免轮询 / MutationObserver 的重绘开销。
+        window.addEventListener('react-chat-window:galgame-mode-change', syncWindowToMinH);
+        // 附件 0↔N 切换走对称事件；setComposerAttachments 在 dedupe 后只在
+        // 跨边界时 dispatch，所以这里不会因为附件计数增减触发不必要的 setBounds。
+        window.addEventListener('react-chat-window:composer-attachments-change', syncWindowToMinH);
+        // 启动时不再主动撑高：app-react-chat-window 在 storage barrier 之后
+        // 调 setGalgameModeEnabled(readPref) 把 false→true 翻转一次，change 事件
+        // 兜底；ON 持久化时这条路径必走、OFF 持久化时不会触发不必要的扩大。
+
+        var collapsed = false;
+        var animating = false;
+        var savedWH = null;
+        var resizing = false;
+
+        // ---- 滚动辅助 ----
+        // 在 scroll 事件中持续跟踪是否处于底部附近，
+        // MutationObserver / resize 回调使用缓存值而非重新计算，
+        // 避免 DOM 变更后 scrollHeight 已增大导致 isNearBottom() 误判。
+        var wasNearBottom = true;
+        function isNearBottom() {
+            if (!wrap) return true;
+            return wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 60;
+        }
+        function scrollToBottom(instant) {
+            if (!wrap || !wasNearBottom) return;
+            wrap.scrollTo({ top: wrap.scrollHeight, behavior: instant ? 'instant' : 'smooth' });
+            wasNearBottom = true;
+        }
+        if (wrap) {
+            wrap.addEventListener('scroll', function() {
+                wasNearBottom = isNearBottom();
+            });
+            new MutationObserver(function() { scrollToBottom(resizing); })
+                .observe(wrap, { childList: true, subtree: true });
+        }
+        // resize 期间也跟随滚动
+        window.addEventListener('resize', function() {
+            if (collapsed) return;
+            scrollToBottom(resizing);
+        });
+
+        // tooltip 自动消失
+        var tooltip = document.getElementById('chat-tooltip');
+        if (tooltip) setTimeout(function(){ tooltip.classList.add('hidden'); }, 5000);
+
+        // ===================== resize handle（右下角拖拽调整大小）=====================
+        // 预缓冲策略：mousedown 时将窗口扩展到工作区最大可用空间，
+        // 拖拽期间仅更新 CSS 变量（零 IPC），mouseup 时一次 setBounds 裁剪至最终尺寸。
+        var _pendingBounds = null;
+        var _expandMax = null;
+        var _cleanupTimer = 0;
+        var _cleanupListener = null;
+        var anchorSX = 0, anchorSY = 0;
+        var snapBounds = null;
+
+        if (rh) rh.addEventListener('mousedown', function(e) {
+            if (collapsed || animating) return;
+            e.preventDefault();
+            e.stopPropagation();
+
+            resizing = true;
+            anchorSX = e.screenX;
+            anchorSY = e.screenY;
+
+            // 同步快照窗口位置/尺寸
+            snapBounds = {
+                x: window.screenX,
+                y: window.screenY,
+                w: window.outerWidth,
+                h: window.outerHeight
+            };
+
+            var root = document.documentElement;
+            // 初始 CSS 变量 = 当前尺寸，防止容器暂时撑满缓冲区
+            root.style.setProperty('--neko-resize-w', snapBounds.w + 'px');
+            root.style.setProperty('--neko-resize-h', snapBounds.h + 'px');
+            root.classList.add('neko-resizing');
+
+            // 移除上一轮残留的 cleanup 监听，防止新拖拽期间误触清理
+            if (_cleanupListener) {
+                window.removeEventListener('resize', _cleanupListener);
+                _cleanupListener = null;
+            }
+            if (_cleanupTimer) { clearTimeout(_cleanupTimer); _cleanupTimer = 0; }
+
+            // 异步获取工作区，预扩展窗口至工作区最大可用空间
+            _expandMax = null;
+            W.getWorkArea().then(function(wa) {
+                if (!wa || !resizing) return;
+                _expandMax = {
+                    w: wa.x + wa.width - snapBounds.x,
+                    h: wa.y + wa.height - snapBounds.y
+                };
+                // 预扩展到工作区最大尺寸（窗口透明，扩展区域不可见）
+                // 这样无论用户拖多快，CSS 变量都不会超出 viewport
+                W.setBounds(snapBounds.x, snapBounds.y, _expandMax.w, _expandMax.h);
+            });
+        });
+
+        document.addEventListener('mousemove', function(e) {
+            if (!resizing || !snapBounds) return;
+
+            var dx = e.screenX - anchorSX;
+            var dy = e.screenY - anchorSY;
+            var w = Math.max(MIN_W, snapBounds.w + dx);
+            var h = Math.max(currentMinH(), snapBounds.h + dy);
+            if (_expandMax) {
+                w = Math.min(w, _expandMax.w);
+                h = Math.min(h, _expandMax.h);
+            }
+
+            _pendingBounds = { x: snapBounds.x, y: snapBounds.y, w: w, h: h };
+            document.body.style.cursor = 'nwse-resize';
+
+            // 仅更新 CSS 变量（同步零延迟），不调 setBounds — 零 IPC 开销
+            var root = document.documentElement;
+            root.style.setProperty('--neko-resize-w', w + 'px');
+            root.style.setProperty('--neko-resize-h', h + 'px');
+        });
+
+        document.addEventListener('mouseup', function() {
+            if (!resizing) return;
+            resizing = false;
+            document.body.style.cursor = '';
+
+            var root = document.documentElement;
+            var fw = _pendingBounds ? _pendingBounds.w : snapBounds.w;
+            var fh = _pendingBounds ? _pendingBounds.h : snapBounds.h;
+
+            // 确保 CSS 变量最终值正确
+            root.style.setProperty('--neko-resize-w', fw + 'px');
+            root.style.setProperty('--neko-resize-h', fh + 'px');
+
+            // 单次 setBounds 裁剪窗口到最终尺寸
+            W.setBounds(snapBounds.x, snapBounds.y, fw, fh);
+
+            // 等待窗口实际 resize 至目标尺寸后，再移除 CSS 变量覆盖
+            var doCleanup = function() {
+                if (_cleanupTimer) { clearTimeout(_cleanupTimer); _cleanupTimer = 0; }
+                window.removeEventListener('resize', doCleanup);
+                _cleanupListener = null;
+                // 用双 rAF 保证浏览器已将窗口尺寸更新到 DOM
+                requestAnimationFrame(function() {
+                    requestAnimationFrame(function() {
+                        root.classList.remove('neko-resizing');
+                        root.style.removeProperty('--neko-resize-w');
+                        root.style.removeProperty('--neko-resize-h');
+                    });
+                });
+            };
+            _cleanupListener = doCleanup;
+            window.addEventListener('resize', doCleanup);
+            _cleanupTimer = setTimeout(doCleanup, 300);
+
+            _pendingBounds = null;
+            _expandMax = null;
+            snapBounds = null;
+        });
+
+        // ===================== 折叠/展开（带动画）=====================
+        if (btn) btn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            if (animating) return;
+            // 展开态 btn 仍触发折叠
+            if (!collapsed) collapseChat();
+        });
+
+        // ===================== 折叠态手动拖拽 + 点击展开 =====================
+        // 拖拽由主进程 DRAG_START/DRAG_STOP 驱动（用 screen.getCursorScreenPoint 轮询），
+        // 避免 Chromium 合成 mousemove 时 screenX 偏移导致的反馈环漂移。
+        var _ballDragging = false, _ballMoved = false;
+        var _ballSX = 0, _ballSY = 0;
+        var CLICK_THRESH = 5;
+
+        box.addEventListener('mousedown', function(e) {
+            if (!collapsed || animating) return;
+            e.preventDefault();
+            _ballDragging = true;
+            _ballMoved = false;
+            _ballSX = e.screenX;
+            _ballSY = e.screenY;
+            // 拖拽期间禁用呼吸动画等昂贵效果，大幅减少透明窗口 setBounds 的重绘开销
+            box.classList.add('dragging');
+            // 将 mousedown 时刻的精确 screen 坐标传给主进程，消除 IPC 延迟偏差
+            W.dragStart(e.screenX, e.screenY);
+        });
+
+        document.addEventListener('mousemove', function(e) {
+            if (!_ballDragging) return;
+            // 注意：Chromium 在 SetWindowPos 后合成的 mousemove 的 screenX 不可靠，
+            // 但仅用于阈值判断（是点击还是拖拽），不用于计算窗口位置，所以可接受。
+            var dx = e.screenX - _ballSX;
+            var dy = e.screenY - _ballSY;
+            if (Math.abs(dx) > CLICK_THRESH || Math.abs(dy) > CLICK_THRESH) {
+                _ballMoved = true;
+            }
+        });
+
+        document.addEventListener('mouseup', function() {
+            if (!_ballDragging) return;
+            _ballDragging = false;
+            box.classList.remove('dragging');
+            W.dragStop();
+            if (!_ballMoved && collapsed && !animating) {
+                expandChat();
+            } else if (_ballMoved && collapsed) {
+                // 拖拽结束后检测出界并回弹
+                checkBoundsAndSnap();
+            }
+        });
+
+        function collapseChat() {
+            animating = true;
+            W.getBounds().then(function(b) {
+                if (!b) { animating = false; return; }
+                savedWH = { w: b.width, h: b.height };
+
+                // 启动缩小 + 淡出动画
+                box.classList.add('neko-collapsing');
+
+                var finished = false;
+                var onTransEnd = function(ev) {
+                    if (ev.propertyName !== 'transform') return;
+                    box.removeEventListener('transitionend', onTransEnd);
+                    if (!finished) { finished = true; doCollapse(b); }
+                };
+                box.addEventListener('transitionend', onTransEnd);
+
+                // 安全超时
+                setTimeout(function() {
+                    box.removeEventListener('transitionend', onTransEnd);
+                    if (!finished) { finished = true; doCollapse(b); }
+                }, 400);
+            });
+        }
+
+        function doCollapse(b) {
+            if (collapsed) return;
+            collapsed = true;
+
+            // 隐藏内容区
+            hdr.style.display = 'none';
+            wrap.style.display = 'none';
+            if (tia) tia.style.display = 'none';
+            if (rh) rh.style.display = 'none';
+
+            // 计算呼吸球位置（左下角对齐）
+            var cx = b.x;
+            var cy = b.y + b.height - BALL;
+            W.getWorkArea().then(function(wa) {
+                if (wa) {
+                    cx = Math.max(wa.x, Math.min(wa.x + wa.width - BALL, cx));
+                    cy = Math.max(wa.y, Math.min(wa.y + wa.height - BALL, cy));
+                }
+                W.setBounds(cx, cy, BALL, BALL);
+
+                // 等窗口实际缩小后再显示呼吸球
+                var shown = false;
+                var showBall = function() {
+                    if (shown) return;
+                    shown = true;
+                    window.removeEventListener('resize', showBall);
+                    box.classList.remove('neko-collapsing');
+                    box.classList.add('minimized');
+                    animating = false;
+                };
+                window.addEventListener('resize', showBall);
+                setTimeout(showBall, 200);
+            });
+        }
+
+        function expandChat() {
+            animating = true;
+            var w = savedWH ? savedWH.w : 400;
+            var h = savedWH ? savedWH.h : 560;
+
+            W.getBounds().then(function(b) {
+                if (!b) { animating = false; return; }
+                var newX = b.x;
+                var newY = b.y + BALL - h;
+
+                W.getWorkArea().then(function(wa) {
+                    if (wa) {
+                        // 钳制尺寸到工作区，防止在更小屏幕上展开溢出
+                        w = Math.min(w, wa.width);
+                        h = Math.min(h, wa.height);
+                        newX = Math.max(wa.x, Math.min(wa.x + wa.width - w, newX));
+                        newY = Math.max(wa.y, Math.min(wa.y + wa.height - h, newY));
+                    }
+
+                    // 1. setBounds 到目标尺寸
+                    W.setBounds(newX, newY, w, h);
+
+                    // 2. 等窗口 resize 后启动展开动画
+                    var started = false;
+                    var startExpand = function() {
+                        if (started) return;
+                        started = true;
+                        window.removeEventListener('resize', startExpand);
+
+                        collapsed = false;
+
+                        // 移除 minimized，设置展开起始态（缩小 + 透明）
+                        box.classList.remove('minimized');
+                        box.classList.add('neko-expand-start');
+                        hdr.style.display = '';
+                        wrap.style.display = '';
+                        if (tia) tia.style.display = '';
+                        if (rh) rh.style.display = '';
+
+                        // 强制 reflow 提交起始态，再切换到展开动画
+                        void box.offsetHeight;
+                        box.classList.remove('neko-expand-start');
+                        box.classList.add('neko-expanding');
+
+                        var done = false;
+                        var onEnd = function(ev) {
+                            if (ev.propertyName !== 'transform') return;
+                            box.removeEventListener('transitionend', onEnd);
+                            if (!done) { done = true; finishExpand(); }
+                        };
+                        box.addEventListener('transitionend', onEnd);
+                        setTimeout(function() {
+                            box.removeEventListener('transitionend', onEnd);
+                            if (!done) { done = true; finishExpand(); }
+                        }, 400);
+                    };
+                    window.addEventListener('resize', startExpand);
+                    setTimeout(startExpand, 150);
+                });
+            });
+        }
+
+        function finishExpand() {
+            box.classList.remove('neko-expanding');
+            animating = false;
+            scrollToBottom(false);
+        }
+
+        // ===================== 游戏窗口联动（收缩 → 还原）=====================
+        // mini-game 路由激活时把 chat.html 收成呼吸球（复用已有 collapseChat
+        // 动画+样式，等同于用户点击右上角最小化按钮的效果）并搬到工作区左下角；
+        // 路由结束时按之前的 (bounds, collapsed?) 快照还原。
+        //
+        // 单一事件源：app-websocket.js 收到 ``game_window_state_change`` 后
+        // dispatch ``neko-game-window-state-change``，多窗口模式 RAW_MESSAGE
+        // forwarding 自动转给 chat.html follower。closed 路径覆盖率与
+        // ``is_game_route_active`` 同源（_finalize 翻 false 时一并推 closed），
+        // 不会出现"游戏已结束但 UI 仍锁着球态"的孤岛。
+        var _gameMinimizeSnap = null;
+        // "用户当前是否仍应处于游戏最小化态"的目标态。所有异步分支（getBounds
+        // / rAF / collapseChat 700ms 落定 / restore 100ms 展开）都拿这个 flag
+        // 跟事件入口对照来判定 stale。
+        //
+        // 修两条 race：
+        // (1) codex P2：原版只在异步回调里写 _gameMinimizeSnap。opened →
+        //     getBounds pending 期间收到 closed → restore 因 snap=null 早返
+        //     → getBounds 落地把 snap 写出来 + 收成球态搬左下角 → 无 closed
+        //     抵消 → UI 永远卡球态。
+        // (2) CodeRabbit Major：closed 撞上 collapseChat() 进行中时，原版
+        //     restore 走 fallback setBounds 回原 bounds，但 doCollapse 内部
+        //     的 getWorkArea+setBounds 在动画 transitionend 后才跑，会把窗口
+        //     再 setBounds 到 ball 位 → 用户看到游戏已结束但聊天框已经被收
+        //     成球态、停在原始底部。
+        //
+        // 修法：
+        // - opened 设 active=true 后调 _gameMinimizeForGame，每条 await 出口
+        //   都 re-check active；closed 同理设 active=false 后调 restore。
+        // - restore 看到 animating=true 时 rAF 重试到动画落定再消费快照——避
+        //   开 doCollapse / expandChat 内部 setBounds 与 restore setBounds 抢位。
+        var _gameWindowActive = false;
+
+        function _moveBallToWorkAreaBottomLeft() {
+            return W.getWorkArea().then(function(wa) {
+                if (!wa) return;
+                if (!collapsed) return; // 状态在异步等待期变了 → 放弃，避免把展开窗口吸到 BALL 尺寸
+                // codex P1：getWorkArea pending 期间 closed 可能已到 → restore
+                // 已经把窗口搬回原 bounds；此时再 setBounds 到工作区左下角会
+                // 把刚还原的位置又覆盖掉，留个孤儿球在屏幕角。recheck 游戏态
+                // flag 与 snap 双双健在才搬位。
+                if (!_gameWindowActive || !_gameMinimizeSnap) return;
+                W.setBounds(wa.x, wa.y + wa.height - BALL, BALL, BALL);
+            });
+        }
+
+        function _gameMinimizeForGame() {
+            if (!_gameWindowActive || _gameMinimizeSnap) return;
+            if (animating) {
+                // 正在收/展过程中 → 等下一帧重试；rAF callback 自身仍 re-check
+                // active，closed 在 rAF 期间到达会让重试 noop
+                requestAnimationFrame(_gameMinimizeForGame);
+                return;
+            }
+            W.getBounds().then(function(b0) {
+                if (!b0 || !_gameWindowActive || _gameMinimizeSnap) return;
+                _gameMinimizeSnap = {
+                    bounds: { x: b0.x, y: b0.y, width: b0.width, height: b0.height },
+                    wasCollapsed: collapsed,
+                    // savedWH 是 collapseChat 折叠时记的展开尺寸；如果用户进游戏前
+                    // 已经手动折叠过一次，这个值非空，要原样保留以便 closed 还原后
+                    // 再用户手点展开时尺寸不变。
+                    savedWHBefore: savedWH ? { w: savedWH.w, h: savedWH.h } : null
+                };
+                if (collapsed) {
+                    _moveBallToWorkAreaBottomLeft();
+                } else {
+                    collapseChat();
+                    // collapseChat → doCollapse 内部链路：transitionend / 200ms timeout
+                    // 之后 collapsed=true、animating=false。这里给一个保守 700ms
+                    // 缓冲（400ms 折叠动画 + 200ms ball-show + 100ms IPC 余量），
+                    // 折叠真落定后再搬位置。
+                    setTimeout(function() {
+                        if (!_gameWindowActive || !_gameMinimizeSnap) return;
+                        if (collapsed && !animating) _moveBallToWorkAreaBottomLeft();
+                    }, 700);
+                }
+            });
+        }
+
+        function _gameRestoreAfterGame() {
+            if (_gameWindowActive || !_gameMinimizeSnap) return;
+            if (animating) {
+                // collapseChat / expandChat 进行中时不能立刻消费快照——doCollapse
+                // 的 getWorkArea+setBounds（或 expandChat 的对偶链）会在动画
+                // transitionend 后跑、把窗口拉到自己的目标位，覆盖 restore
+                // setBounds。等 animating 落定后再走 restore 主链路。
+                requestAnimationFrame(_gameRestoreAfterGame);
+                return;
+            }
+            // snap 一旦在本帧消费就 null 出去，避免 rAF 重入二次消费
+            var snap = _gameMinimizeSnap;
+            _gameMinimizeSnap = null;
+            if (snap.wasCollapsed) {
+                if (!collapsed) {
+                    // codex P2：进游戏前球态 + 用户在 game 期间手动点球展开了
+                    // → 当前是展开态，DOM 已 hdr/wrap/tia 显示。如果还按 snap.bounds
+                    // (BALL × BALL) setBounds，窗口被压成 82×82 但 DOM 仍展开 →
+                    // 内容裁切，UI broken 直到用户再次手动恢复。尊重用户当前展开
+                    // 意图，不强行复位窗口尺寸；只恢复 savedWHBefore（让用户下次
+                    // 主动 collapse 时尺寸是进游戏前那个，而不是 game 期 collapseChat
+                    // 写入的中间值）。
+                    if (snap.savedWHBefore) savedWH = { w: snap.savedWHBefore.w, h: snap.savedWHBefore.h };
+                    return;
+                }
+                // 进游戏前球态 + 现在仍是球态 → 球搬回原坐标即可，savedWH 还原
+                // 成进游戏之前的展开尺寸（不是当前游戏期间窗口尺寸的副本）
+                W.setBounds(snap.bounds.x, snap.bounds.y, snap.bounds.width, snap.bounds.height);
+                if (snap.savedWHBefore) savedWH = { w: snap.savedWHBefore.w, h: snap.savedWHBefore.h };
+                return;
+            }
+            // 进游戏前是展开态、当前是球态 → 把 expandChat 的目标尺寸钉到原 bounds
+            // 让动画展开到原大小；球先搬到原 bounds 的底部对齐位（与 expandChat
+            // 内部 newY = b.y + BALL - h 推算的"展开后还原原顶端"语义一致）。
+            if (!collapsed) {
+                // 异常态（用户在 game 期间手动展开了？）—— 至少 setBounds 回去，
+                // 不动画，不再调 expandChat（会被 animating guard 拦住）。注：
+                // animating 在此分支已被入口的 rAF 等待保证为 false，不需要再
+                // OR 一遍（github-code-quality bot 指出原版 `|| animating` 永
+                // 远为 false 是 dead branch）。
+                W.setBounds(snap.bounds.x, snap.bounds.y, snap.bounds.width, snap.bounds.height);
+                if (snap.savedWHBefore) savedWH = { w: snap.savedWHBefore.w, h: snap.savedWHBefore.h };
+                return;
+            }
+            var b = snap.bounds;
+            W.setBounds(b.x, b.y + b.height - BALL, BALL, BALL);
+            setTimeout(function() {
+                // 100ms 内若 opened 又来（race：closed → restore → opened，
+                // 100ms 期间 active 翻 true），不再 expand 让新 opened 链路接手
+                if (_gameWindowActive) return;
+                if (!collapsed || animating) return;
+                savedWH = { w: b.width, h: b.height };
+                expandChat();
+            }, 100);
+        }
+
+        var _drawingGuessChatHiddenSnap = null;
+        var _drawingGuessChatHideActive = false;
+        var _drawingGuessChatWasVisible = null;
+        var _drawingGuessChatHideGeneration = 0;
+        var _drawingGuessChatDocumentVisibilityEpoch = 0;
+        var _drawingGuessChatPendingShow = null;
+
+        document.addEventListener('visibilitychange', function() {
+            _drawingGuessChatDocumentVisibilityEpoch += 1;
+        });
+
+        function _isDrawingGuessGame(detail) {
+            var gameType = String((detail && detail.gameType) || '').toLowerCase().replace(/-/g, '_');
+            return gameType === 'drawing_guess';
+        }
+
+        function _drawingGuessChatVisibilitySnapshot() {
+            var visible = !document.hidden;
+            var epoch = _drawingGuessChatDocumentVisibilityEpoch;
+            if (typeof W.isIdleTargetAvailable === 'function') {
+                try {
+                    visible = W.isIdleTargetAvailable() === true;
+                } catch (_) {
+                    visible = false;
+                }
+            }
+            if (typeof W.getIdleTargetAvailabilityEpoch === 'function') {
+                try {
+                    var bridgeEpoch = Number(W.getIdleTargetAvailabilityEpoch());
+                    if (Number.isFinite(bridgeEpoch) && bridgeEpoch >= 0) epoch = bridgeEpoch;
+                } catch (_) {
+                    // The document visibility epoch remains a safe fallback.
+                }
+            }
+            return { visible: visible, epoch: epoch };
+        }
+
+        function _isDrawingGuessChatVisible() {
+            var visibility = _drawingGuessChatVisibilitySnapshot();
+            var pendingShow = _drawingGuessChatPendingShow;
+            _drawingGuessChatPendingShow = null;
+            // W.show() is one-way IPC. Until visibility advances, a following
+            // game must supersede that outstanding show with a matching hide.
+            return visibility.visible || !!(
+                pendingShow && pendingShow.epoch === visibility.epoch
+            );
+        }
+
+        function _hideChatForDrawingGuess() {
+            if (!_gameWindowActive) return;
+            if (typeof W.hide !== 'function' || typeof W.show !== 'function') {
+                _gameMinimizeForGame();
+                return;
+            }
+            if (!_drawingGuessChatHideActive) {
+                // Latch this before getBounds or hide: repeated reconciliation
+                // runs after W.hide() must not overwrite the pre-game state.
+                _drawingGuessChatWasVisible = _isDrawingGuessChatVisible();
+                _drawingGuessChatHideActive = true;
+                _drawingGuessChatHideGeneration += 1;
+            }
+            if (typeof W.setCompactChatBallTemporarilyHidden === 'function') {
+                W.setCompactChatBallTemporarilyHidden(true);
+            }
+            if (_drawingGuessChatHiddenSnap) {
+                if (_drawingGuessChatHiddenSnap.wasVisible) W.hide();
+                return;
+            }
+            if (animating) {
+                requestAnimationFrame(_hideChatForDrawingGuess);
+                return;
+            }
+            var hideGeneration = _drawingGuessChatHideGeneration;
+            function hideWithSnap(b0) {
+                if (hideGeneration !== _drawingGuessChatHideGeneration
+                    || !_drawingGuessChatHideActive || !_gameWindowActive || _drawingGuessChatHiddenSnap) return;
+                _drawingGuessChatHiddenSnap = {
+                    bounds: b0 ? { x: b0.x, y: b0.y, width: b0.width, height: b0.height } : null,
+                    savedWHBefore: savedWH ? { w: savedWH.w, h: savedWH.h } : null,
+                    wasVisible: _drawingGuessChatWasVisible === true
+                };
+                if (_drawingGuessChatHiddenSnap.wasVisible) W.hide();
+            }
+            if (typeof W.getBounds !== 'function') {
+                hideWithSnap(null);
+                return;
+            }
+            W.getBounds().then(hideWithSnap).catch(function() {
+                hideWithSnap(null);
+            });
+        }
+
+        function _restoreChatAfterDrawingGuess() {
+            // Invalidate getBounds callbacks before clearing the current
+            // ownership state; a later game round must not reuse old bounds.
+            _drawingGuessChatHideGeneration += 1;
+            _drawingGuessChatHideActive = false;
+            var snap = _drawingGuessChatHiddenSnap;
+            _drawingGuessChatHiddenSnap = null;
+            _drawingGuessChatWasVisible = null;
+            if (typeof W.show !== 'function') {
+                _gameRestoreAfterGame();
+                return;
+            }
+            if (typeof W.setCompactChatBallTemporarilyHidden === 'function') {
+                W.setCompactChatBallTemporarilyHidden(false);
+            }
+            if (snap && snap.wasVisible) {
+                var visibilityBeforeShow = _drawingGuessChatVisibilitySnapshot();
+                _drawingGuessChatPendingShow = { epoch: visibilityBeforeShow.epoch };
+                W.show();
+            }
+            if (!snap) return;
+            if (snap.bounds && typeof W.setBounds === 'function') {
+                W.setBounds(snap.bounds.x, snap.bounds.y, snap.bounds.width, snap.bounds.height);
+            }
+            if (snap.savedWHBefore) savedWH = { w: snap.savedWHBefore.w, h: snap.savedWHBefore.h };
+        }
+
+        window.addEventListener('neko-game-window-state-change', function(ev) {
+            var detail = ev && ev.detail ? ev.detail : {};
+            if (detail.action === 'opened') {
+                _gameWindowActive = true;
+                if (_isDrawingGuessGame(detail)) {
+                    _hideChatForDrawingGuess();
+                } else {
+                    _gameMinimizeForGame();
+                }
+            } else if (detail.action === 'closed') {
+                _gameWindowActive = false;
+                if (_drawingGuessChatHideActive || _drawingGuessChatHiddenSnap) {
+                    _restoreChatAfterDrawingGuess();
+                } else {
+                    _gameRestoreAfterGame();
+                }
+            }
+        });
+
+        // Bootstrap reconciliation：edge-triggered 的 game_window_state_change WS
+        // 事件只在 activate / finalize 推送，订阅者初次加载时若 route 已经在
+        // active 状态会听不到历史 opened（chat.html 是后开起来的窗口，可能
+        // game 已经先跑起来了）。init 路径主动查 /api/game/route/active，
+        // active 就自己 dispatch opened 让 UI 对齐。codex P1。
+        // closed 不需要 sync——初始 _gameWindowActive=false / snap=null 就是
+        // idle 状态，已对齐。
+        // WS reconnect 后 missing closed 的还原是更复杂的 case（需要订阅
+        // reconnect 事件 + 主动检查），本 PR 暂不覆盖。
+        (function syncGameWindowStateOnInit() {
+            var lan = '';
+            try {
+                if (window.appState && typeof window.appState.lanlan_name === 'string') {
+                    lan = window.appState.lanlan_name;
+                }
+                if (!lan && window.lanlan_config && typeof window.lanlan_config.lanlan_name === 'string') {
+                    lan = window.lanlan_config.lanlan_name;
+                }
+            } catch (_) {}
+            if (!lan) {
+                // lanlan_name 还没解析出来 → 100ms 后重试一次（chat.html 通常
+                // 在 appState 已就绪后才挂这个 IIFE，但 storage barrier 等可能
+                // 让 appState 滞后，给一次 retry 兜底）
+                setTimeout(syncGameWindowStateOnInit, 100);
+                return;
+            }
+            // Bootstrap snapshot vs. live socket: this fetch can start while route
+            // A is active and resolve after A's `closed` event has already been
+            // handled, and the dispatch below would then re-open a dead route on
+            // this page. Every close path advances the route state revision, so
+            // compare it across the request the same way the reconnect
+            // reconciliation in app-websocket.js does.
+            var routeRevisionAtBootstrap = -1;
+            try {
+                if (window.appState) {
+                    routeRevisionAtBootstrap = Number(window.appState.gameRouteStateRevision) || 0;
+                }
+            } catch (_) {}
+            fetch('/api/game/route/active?lanlan_name=' + encodeURIComponent(lan))
+                .then(function(resp) { return resp && resp.ok ? resp.json() : null; })
+                .then(function(data) {
+                    if (!data || !data.active) return;
+                    try {
+                        if (routeRevisionAtBootstrap >= 0 && window.appState
+                            && (Number(window.appState.gameRouteStateRevision) || 0)
+                                !== routeRevisionAtBootstrap) {
+                            console.log('[GameWindow] 忽略晚到的启动路由快照');
+                            return;
+                        }
+                    } catch (_) {}
+                    try {
+                        window.dispatchEvent(new CustomEvent('neko-game-window-state-change', {
+                            detail: {
+                                action: 'opened',
+                                lanlanName: data.lanlan_name || lan,
+                                gameType: data.game_type || '',
+                                sessionId: data.session_id || '',
+                                routeInstanceId: data.sdk_route_instance_id || ''
+                            }
+                        }));
+                    } catch (_) {}
+                })
+                .catch(function() { /* 静默 —— bootstrap 失败不影响普通态 UI */ });
+        })();
+
+        // ===================== 边界检测与回弹 =====================
+        var _bounceAnim = null;
+        var _bouncing = false;
+
+        function checkBoundsAndSnap() {
+            if (animating || resizing || _bouncing) return;
+            var bx = window.screenX, by = window.screenY;
+            var bw = window.outerWidth, bh = window.outerHeight;
+
+            W.getWorkArea().then(function(wa) {
+                if (!wa || animating || resizing || _bouncing) return;
+
+                // 钳位：窗口完全在工作区内
+                var tx = Math.max(wa.x, Math.min(wa.x + wa.width - bw, bx));
+                var ty = Math.max(wa.y, Math.min(wa.y + wa.height - bh, by));
+
+                if (tx === bx && ty === by) return;
+
+                // 取消正在进行的回弹动画
+                if (_bounceAnim) { cancelAnimationFrame(_bounceAnim); _bounceAnim = null; }
+
+                _bouncing = true;
+                var startX = bx, startY = by;
+                var startTime = performance.now();
+                var DURATION = 220;
+
+                function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+                function step(now) {
+                    var elapsed = now - startTime;
+                    var progress = Math.min(elapsed / DURATION, 1);
+                    var ease = easeOutCubic(progress);
+                    var cx = Math.round(startX + (tx - startX) * ease);
+                    var cy = Math.round(startY + (ty - startY) * ease);
+                    // 用 setBounds 替代 setPosition —— Windows 上 transparent 窗口
+                    // setPosition 会导致尺寸漂移（DWM 重新计算非客户区）
+                    W.setBounds(cx, cy, bw, bh);
+
+                    if (progress < 1) {
+                        _bounceAnim = requestAnimationFrame(step);
+                    } else {
+                        _bounceAnim = null;
+                        _bouncing = false;
+                    }
+                }
+                _bounceAnim = requestAnimationFrame(step);
+            });
+        }
+
+        // 拖拽结束检测：轮询 screenX/screenY，位置稳定后触发边界检查
+        (function() {
+            var lastX = window.screenX, lastY = window.screenY;
+            var wasMoving = false;
+            var stableFrames = 0;
+
+            setInterval(function() {
+                // 回弹动画 / 呼吸球拖拽期间跟踪位置但不检测
+                if (_bouncing || animating || resizing || _ballDragging) {
+                    lastX = window.screenX;
+                    lastY = window.screenY;
+                    wasMoving = false;
+                    stableFrames = 0;
+                    return;
+                }
+
+                var cx = window.screenX, cy = window.screenY;
+                if (cx !== lastX || cy !== lastY) {
+                    wasMoving = true;
+                    stableFrames = 0;
+                    lastX = cx;
+                    lastY = cy;
+                } else if (wasMoving) {
+                    stableFrames++;
+                    if (stableFrames >= 3) {
+                        wasMoving = false;
+                        stableFrames = 0;
+                        checkBoundsAndSnap();
+                    }
+                }
+            }, 60);
+        })();
+
+        console.log('[Chat Standalone] ready');
+
+        // ===== 截图结果监听（多窗口模式下 Pet 窗口代为全屏截图裁剪后回传）=====
+        window.addEventListener('neko:screenshot-result', function(e) {
+            var result = e.detail;
+            if (result && result.dataUrl) {
+                if (window.appButtons && typeof window.appButtons.enqueueCapturedScreenshotResult === 'function') {
+                    window.appButtons.enqueueCapturedScreenshotResult(result).catch(function(error) {
+                        console.warn('[Screenshot] proxy result queue failed:', error);
+                        if (typeof window.showStatusToast === 'function') {
+                            window.showStatusToast(
+                                typeof window.t === 'function' ? window.t('app.screenshotFailed') : '\u622A\u56FE\u5931\u8D25',
+                                5000
+                            );
+                        }
+                    });
+                    return;
+                }
+                // 优先写入旧版 pending list DOM，再由 syncPendingComposerAttachments
+                // 自动同步到 React Chat，确保 legacy sendTextPayloadInternal 和 React 都读到同一套数据。
+                if (typeof window.addScreenshotToList === 'function') {
+                    window.addScreenshotToList(result.dataUrl);
+                } else if (window.reactChatWindowHost) {
+                    var state = window.reactChatWindowHost.getState();
+                    var attachments = (state && state.composerAttachments) ? state.composerAttachments.slice() : [];
+                    attachments.push({
+                        id: 'screenshot-' + Date.now(),
+                        url: result.dataUrl,
+                        alt: (typeof window.t === 'function' ? window.t('chat.pendingImageAlt', { index: attachments.length + 1 }) : '') || ('图片 ' + (attachments.length + 1))
+                    });
+                    window.reactChatWindowHost.setComposerAttachments(attachments);
+                }
+                if (typeof window.showStatusToast === 'function') {
+                    window.showStatusToast(
+                        typeof window.t === 'function' ? window.t('app.screenshotAdded') : '\u622A\u56FE\u5DF2\u6DFB\u52A0\uFF0C\u70B9\u51FB\u53D1\u9001\u4E00\u8D77\u53D1\u9001',
+                        3000
+                    );
+                }
+            } else if (result && result.error) {
+                if (typeof window.showStatusToast === 'function') {
+                    window.showStatusToast(
+                        (typeof window.t === 'function' ? window.t('app.screenshotFailed') : '\u622A\u56FE\u5931\u8D25') + (result.error ? ': ' + result.error : ''),
+                        5000
+                    );
+                }
+            }
+        });
+    })();
+    </script>
+</body>
+</html>

@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en" class="agent-hud-standalone-page">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>N.E.K.O. Agent HUD</title>
+    <!-- 复用主页面的 i18n 和 CSS -->
+    <script src="/static/i18n-i18next.js"></script>
+    <link rel="stylesheet" href="/static/css/index.css">
+    <link rel="stylesheet" href="/static/css/dark-mode.css">
+    <script src="/static/theme-manager.js"></script>
+    <style>
+        html.agent-hud-standalone-page,
+        body.agent-hud-standalone-page:not(.lanlan-pet-mode) {
+            margin: 0; padding: 0;
+            width: 100%; height: 100%;
+            background: transparent !important;
+            overflow: hidden;
+        }
+        /* AgentHUD 独立窗口：复用 common-ui-hud.js 的样式 */
+        #agent-hud-root {
+            width: 100%; height: 100%;
+        }
+        /* 独立 AgentHUD 窗口：拖拽交给 Electron 原生窗口区域处理。 */
+        body.agent-hud-standalone-page #agent-task-hud {
+            -webkit-app-region: no-drag;
+        }
+        body.agent-hud-standalone-page #agent-task-hud-header {
+            -webkit-app-region: drag;
+            cursor: grab;
+        }
+        body.agent-hud-standalone-page #agent-task-hud-header:active {
+            cursor: grabbing;
+        }
+        body.agent-hud-standalone-page #agent-task-list,
+        body.agent-hud-standalone-page #agent-task-list *,
+        body.agent-hud-standalone-page #agent-task-hud-minimize,
+        body.agent-hud-standalone-page #agent-task-hud-cancel,
+        body.agent-hud-standalone-page .task-card,
+        body.agent-hud-standalone-page .task-card * {
+            -webkit-app-region: no-drag;
+        }
+    </style>
+</head>
+<body class="agent-hud-standalone-page">
+    <div id="agent-hud-root">
+        <!-- common-ui-hud.js 的 DOM 将在此注入 -->
+    </div>
+
+    <!-- 加载 AgentHUD 组件 -->
+    <script src="/static/neko-tooltip.js"></script>
+    <script src="/static/common-ui-hud.js"></script>
+    <script>
+        // AgentHUD 独立窗口模式：接收 IPC 消息并更新 UI
+        // window.AgentHUD 由 common-ui-hud.js 提供
+
+        function applyAgentData(data) {
+            if (window.AgentHUD && typeof window.AgentHUD.updateAgentTaskHUD === 'function') {
+                window.AgentHUD.showAgentTaskHUD({ ignoreVisibilityPreference: true });
+                window.AgentHUD.updateAgentTaskHUD({
+                    success: true,
+                    tasks: data.tasks || [],
+                    running_count: data.running_count || 0,
+                    queued_count: data.queued_count || 0,
+                });
+            }
+        }
+
+        // 页面加载时主动拉取当前状态，避免打开 HUD 窗口后看不到已有任务
+        fetch('/api/agent/state').then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }).then(function (resp) {
+            if (!resp || !resp.success || !resp.snapshot) return;
+            var activeTasks = resp.snapshot.active_tasks || [];
+            var running = activeTasks.filter(function (t) { return t.status === 'running'; });
+            var queued = activeTasks.filter(function (t) { return t.status === 'queued'; });
+            if (activeTasks.length > 0) {
+                applyAgentData({ tasks: activeTasks, running_count: running.length, queued_count: queued.length });
+            }
+        });
+
+        window.addEventListener('neko-ws-agent-update', function (e) {
+            applyAgentData(e.detail || {});
+        });
+    </script>
+</body>
+</html>

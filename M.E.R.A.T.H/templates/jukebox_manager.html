@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="UTF-8">
+    <title>N.E.K.O. Jukebox Manager</title>
+
+    <!-- i18n -->
+    <script src="/static/i18n-i18next.js"></script>
+    <!-- 暗色模式 -->
+    <link rel="stylesheet" href="/static/css/dark-mode.css">
+    <script src="/static/theme-manager.js"></script>
+
+    <style>
+        html, body {
+            margin: 0; padding: 0;
+            width: 100%; height: 100%;
+            overflow: hidden;
+            background: rgba(0, 0, 0, 0.85);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        html[data-theme="dark"],
+        html[data-theme="dark"] body {
+            background: #101722;
+            color-scheme: dark;
+        }
+
+        /* 管理器面板覆盖全窗口 */
+        .jukebox-sam-panel {
+            position: fixed !important;
+            inset: 0 !important;
+            width: 100% !important;
+            height: 100% !important;
+            max-height: 100% !important;
+            border-radius: 0 !important;
+            box-sizing: border-box !important;
+        }
+
+        /* 标题栏走 OS 原生拖动（Chromium `-webkit-app-region: drag` → Windows HTCAPTION）。
+           不再用 JS mousedown + setBounds 模拟，避免和 Windows 边缘 WS_THICKFRAME resize
+           热区并发触发导致"拖一下窗口变大一下"。整块面板不能都设为 drag，
+           否则 frameless 原生 resize 边缘和内容滚动区会被 HTCAPTION 抢走。 */
+        .jukebox-sam-panel {
+            -webkit-app-region: no-drag !important;
+            cursor: default;
+        }
+
+        .jukebox-sam-panel .sam-header {
+            -webkit-app-region: drag !important;
+            cursor: grab;
+            touch-action: none;
+        }
+
+        .jukebox-sam-panel .sam-title,
+        .jukebox-sam-panel .sam-drag-fill {
+            -webkit-app-region: drag !important;
+            cursor: grab;
+        }
+
+        /* 交互元素必须 no-drag，否则点击会被原生拖动吃掉。 */
+        .jukebox-sam-panel button,
+        .jukebox-sam-panel input,
+        .jukebox-sam-panel a,
+        .jukebox-sam-panel select,
+        .jukebox-sam-panel textarea,
+        .jukebox-sam-panel label,
+        .jukebox-sam-panel [contenteditable="true"],
+        .jukebox-sam-panel .sam-tab,
+        .jukebox-sam-panel .sam-close-btn,
+        .jukebox-sam-panel .sam-content,
+        .jukebox-sam-panel .sam-item,
+        .jukebox-sam-panel .sam-binding-item,
+        .jukebox-sam-panel .sam-checkbox,
+        .jukebox-sam-panel .sam-unbind-btn,
+        .jukebox-sam-panel .sam-add-binding-btn,
+        .jukebox-sam-panel .sam-click-add,
+        .jukebox-sam-panel .sam-file-drop-zone {
+            -webkit-app-region: no-drag !important;
+        }
+
+        /* SAM.getStyles() 会在运行时后注入；独立页需要最后再覆盖一次布局，
+           避免通用面板 padding / max-width / cursor 让右侧出现额外块或误导热区。 */
+        body .jukebox-sam-panel {
+            inset: 0 !important;
+            width: 100vw !important;
+            height: 100vh !important;
+            min-width: 0 !important;
+            min-height: 0 !important;
+            max-width: none !important;
+            max-height: none !important;
+            padding: 0 !important;
+            overflow: hidden !important;
+            cursor: default !important;
+        }
+
+        body .jukebox-sam-panel .sam-header {
+            display: grid !important;
+            grid-template-columns: auto minmax(0, 1fr) auto !important;
+            align-items: center !important;
+            gap: 8px !important;
+            cursor: grab !important;
+            overflow: visible !important;
+        }
+
+        body .jukebox-sam-panel .sam-tabs {
+            min-width: 0 !important;
+            overflow: hidden !important;
+        }
+
+        body .jukebox-sam-panel .sam-tab {
+            min-width: 0 !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+            white-space: nowrap !important;
+        }
+
+        body .jukebox-sam-panel .sam-close-btn {
+            width: 36px !important;
+            height: 36px !important;
+            min-width: 36px !important;
+            box-sizing: border-box !important;
+        }
+
+        body .jukebox-sam-panel .sam-title,
+        body .jukebox-sam-panel .sam-drag-fill {
+            cursor: grab !important;
+        }
+
+        body .jukebox-sam-panel .sam-drag-fill {
+            display: none !important;
+        }
+
+        body .jukebox-sam-panel .sam-header:active,
+        body.sam-panel-dragging .jukebox-sam-panel .sam-header,
+        body .jukebox-sam-panel .sam-title:active,
+        body .jukebox-sam-panel .sam-drag-fill:active {
+            cursor: grabbing !important;
+        }
+
+        body.neko-jukebox-manager-bridge-drag .jukebox-sam-panel .sam-header,
+        body.neko-jukebox-manager-bridge-drag .jukebox-sam-panel .sam-title,
+        body.neko-jukebox-manager-bridge-drag .jukebox-sam-panel .sam-drag-fill {
+            -webkit-app-region: no-drag !important;
+            cursor: grab !important;
+        }
+
+        /* Keep this standalone override palette in sync with static/jukebox/jukebox/*.js. */
+        html[data-theme="dark"] body .jukebox-sam-panel {
+            color: #e6edf3 !important;
+            background: linear-gradient(160deg, rgba(18, 25, 36, 0.98), rgba(26, 38, 52, 0.96)) !important;
+            border-color: rgba(124, 218, 244, 0.24) !important;
+            box-shadow: 0 20px 54px rgba(2, 8, 23, 0.54), 0 4px 18px rgba(0, 0, 0, 0.28) !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-header {
+            border-bottom-color: rgba(124, 218, 244, 0.16) !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-title,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-import-header h4,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-item-name,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-binding-item-name,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-danger-modal h3 {
+            color: #f8fafc !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-close-btn,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-tab,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-btn,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-add-binding-btn,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-visibility-btn {
+            color: #b7e8f8 !important;
+            background: linear-gradient(160deg, rgba(30, 41, 59, 0.9), rgba(15, 23, 42, 0.82)) !important;
+            border-color: rgba(124, 218, 244, 0.22) !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-close-btn:hover,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-tab:hover,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-btn:hover,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-add-binding-btn:hover,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-visibility-btn:hover {
+            color: #f8fafc !important;
+            background: linear-gradient(135deg, rgba(14, 165, 233, 0.28), rgba(244, 114, 182, 0.18)) !important;
+            border-color: rgba(124, 218, 244, 0.36) !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-tab.active {
+            color: #ffffff !important;
+            background: linear-gradient(135deg, rgba(14, 165, 233, 0.88), rgba(244, 114, 182, 0.62)) !important;
+            box-shadow: 0 8px 20px rgba(14, 165, 233, 0.22) !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-file-drop-zone,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-bindings-list {
+            border-color: rgba(124, 218, 244, 0.22) !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-file-drop-zone:hover,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-file-drop-zone.drag-over,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-bindings-list.drag-over {
+            background: rgba(14, 165, 233, 0.12) !important;
+            border-color: rgba(125, 211, 252, 0.48) !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-drop-hint,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-empty,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-import-hint,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-unified-hint,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-danger-modal-detail,
+        html[data-theme="dark"] body > .sam-danger-modal-backdrop .sam-danger-modal-detail {
+            color: #94a3b8 !important;
+            background: rgba(15, 23, 42, 0.58) !important;
+            border-color: rgba(124, 218, 244, 0.18) !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-item,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-binding-item {
+            background: rgba(15, 23, 42, 0.58) !important;
+            border-color: rgba(124, 218, 244, 0.16) !important;
+            box-shadow: 0 8px 20px rgba(2, 8, 23, 0.24) !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-item:hover,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-binding-item:hover,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-add-hint:hover,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-import-item:hover,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-item-name:hover,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-item-artist:hover {
+            background: rgba(30, 41, 59, 0.78) !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-item-name:focus,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-item-artist:focus {
+            background: rgba(14, 165, 233, 0.16) !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-item-artist,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-import-item-name,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-checkbox,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-bindings-section h4,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-item-format,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-binding-item-index {
+            color: #b8c7d9 !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-item-format,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-binding-item-index,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-binding-tag,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-binding-count {
+            background: rgba(30, 41, 59, 0.76) !important;
+            border-color: rgba(124, 218, 244, 0.18) !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-binding-tag {
+            color: #b7e8f8 !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-binding-count {
+            color: #f8fafc !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-binding-item-tags {
+            border-top-color: rgba(124, 218, 244, 0.14) !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-add-binding-input,
+        html[data-theme="dark"] body .jukebox-sam-panel input:not([type="checkbox"]):not([type="file"]),
+        html[data-theme="dark"] body .jukebox-sam-panel textarea,
+        html[data-theme="dark"] body .jukebox-sam-panel select {
+            color: #e6edf3 !important;
+            background: rgba(15, 23, 42, 0.78) !important;
+            border-color: rgba(124, 218, 244, 0.24) !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-add-binding-input:focus,
+        html[data-theme="dark"] body .jukebox-sam-panel input:not([type="checkbox"]):not([type="file"]):focus,
+        html[data-theme="dark"] body .jukebox-sam-panel textarea:focus,
+        html[data-theme="dark"] body .jukebox-sam-panel select:focus {
+            border-color: #38bdf8 !important;
+            box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.18) !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel input[type="checkbox"] {
+            accent-color: #38bdf8;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-import-container {
+            background: rgba(15, 23, 42, 0.52) !important;
+            border-color: rgba(124, 218, 244, 0.18) !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-import-header,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-list-header,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-footer,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-import-footer {
+            background: rgba(15, 23, 42, 0.62) !important;
+            border-color: rgba(124, 218, 244, 0.14) !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-selection-info,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-footer,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-danger-modal p,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-danger-modal-detail,
+        html[data-theme="dark"] body > .sam-danger-modal-backdrop .sam-danger-modal p,
+        html[data-theme="dark"] body > .sam-danger-modal-backdrop .sam-danger-modal-detail {
+            color: #b8c7d9 !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-item-selected {
+            background: rgba(14, 165, 233, 0.18) !important;
+            border-left-color: #38bdf8 !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-visibility-btn.hidden {
+            color: #f9a8d4 !important;
+            background: rgba(244, 114, 182, 0.14) !important;
+            border-color: rgba(244, 114, 182, 0.28) !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-delete-btn,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-btn-danger,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-danger-modal-confirm,
+        html[data-theme="dark"] body > .sam-danger-modal-backdrop .sam-danger-modal-confirm {
+            color: #fca5a5 !important;
+            background: rgba(220, 38, 38, 0.14) !important;
+            border-color: rgba(248, 113, 113, 0.28) !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-delete-btn:hover,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-btn-danger:hover,
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-danger-modal-confirm:hover,
+        html[data-theme="dark"] body > .sam-danger-modal-backdrop .sam-danger-modal-confirm:hover {
+            color: #fff1f2 !important;
+            background: rgba(220, 38, 38, 0.24) !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-danger-modal-backdrop,
+        html[data-theme="dark"] body > .sam-danger-modal-backdrop {
+            background: rgba(2, 8, 23, 0.68) !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-danger-modal,
+        html[data-theme="dark"] body > .sam-danger-modal-backdrop .sam-danger-modal {
+            color: #e6edf3 !important;
+            background: linear-gradient(160deg, rgba(15, 23, 42, 0.98), rgba(30, 41, 59, 0.94)) !important;
+            border-color: rgba(124, 218, 244, 0.22) !important;
+            box-shadow: 0 20px 54px rgba(2, 8, 23, 0.58) !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-sam-panel .sam-danger-modal-cancel,
+        html[data-theme="dark"] body > .sam-danger-modal-backdrop .sam-danger-modal-cancel {
+            color: #dbeafe !important;
+            background: rgba(30, 41, 59, 0.92) !important;
+            border-color: rgba(124, 218, 244, 0.2) !important;
+        }
+
+        html[data-theme="dark"] body .jukebox-tooltip,
+        html[data-theme="dark"] body .sam-danger-tooltip {
+            color: #e6edf3 !important;
+            background: linear-gradient(160deg, rgba(15, 23, 42, 0.96), rgba(30, 41, 59, 0.92)) !important;
+            border-color: rgba(124, 218, 244, 0.2) !important;
+            box-shadow: 0 12px 30px rgba(2, 8, 23, 0.42) !important;
+        }
+    </style>
+</head>
+<body>
+    <script>
+        // 标记为管理器独立窗口模式
+        window.__NEKO_JUKEBOX_MANAGER_STANDALONE__ = true;
+    </script>
+    <!-- jukebox/*.js 包含 SongActionManager 定义 -->
+    <script src="/static/jukebox/jukebox/bootstrap.js?v={{ static_asset_version }}"></script>
+    <script src="/static/jukebox/jukebox/core.js?v={{ static_asset_version }}"></script>
+    <script src="/static/jukebox/jukebox/manager.js?v={{ static_asset_version }}"></script>
+    <script src="/static/jukebox/jukebox/shell.js?v={{ static_asset_version }}"></script>
+    <script src="/static/jukebox/jukebox/transport.js?v={{ static_asset_version }}"></script>
+    <script src="/static/jukebox/jukebox/wiring.js?v={{ static_asset_version }}"></script>
+    <script>
+        // 管理器独立窗口初始化
+        // 拖动走 CSS `-webkit-app-region: drag`（OS 原生），不再用 JS mousedown 模拟。
+        // 原因：JS 设 setBounds 会和 Windows 边缘 resize 热区并发，看起来"一拖就变大"。
+        // 原生拖动下 Chromium 返回 HTCAPTION，Windows 直接走窗口移动，绕开 resize 逻辑。
+
+        function _setManagerAppRegion(element, value) {
+            if (!element) return;
+            try {
+                element.style.setProperty('-webkit-app-region', value, 'important');
+            } catch (_) {
+                element.style.webkitAppRegion = value;
+            }
+        }
+
+        function _eventScreenPoint(event) {
+            var point = event.touches ? event.touches[0] : event;
+            return {
+                x: typeof point.screenX === 'number' ? point.screenX : point.clientX,
+                y: typeof point.screenY === 'number' ? point.screenY : point.clientY
+            };
+        }
+
+        function _selectManagerDragBridge() {
+            var candidates = [window.nekoJukeboxBridge, window.nekoJukeboxManagerBridge];
+            for (var i = 0; i < candidates.length; i++) {
+                var candidate = candidates[i];
+                if (candidate && typeof candidate.dragStart === 'function' && typeof candidate.dragStop === 'function') {
+                    return candidate;
+                }
+            }
+            return null;
+        }
+
+        function _enableManagerBridgeCursorDrag(panel) {
+            var bridge = _selectManagerDragBridge();
+            if (!bridge) return false;
+
+            var header = panel.querySelector('.sam-header');
+            if (!header) return false;
+
+            document.body.classList.add('neko-jukebox-manager-bridge-drag');
+            _setManagerAppRegion(header, 'no-drag');
+            panel.querySelectorAll('.sam-title, .sam-drag-fill').forEach(function(element) {
+                _setManagerAppRegion(element, 'no-drag');
+            });
+            panel.querySelectorAll('button, input, a, select, textarea, label, [contenteditable="true"], .sam-tab, .sam-close-btn').forEach(function(element) {
+                _setManagerAppRegion(element, 'no-drag');
+            });
+
+            var dragging = false;
+            function finishDrag() {
+                if (!dragging) return;
+                dragging = false;
+                document.body.classList.remove('sam-panel-dragging');
+                try { bridge.dragStop(); } catch (_) {}
+            }
+
+            function startDrag(event) {
+                if (typeof event.button === 'number' && event.button !== 0) return;
+                if (event.target.closest('button, input, a, select, textarea, label, [contenteditable="true"], .sam-tab, .sam-close-btn')) return;
+
+                event.preventDefault();
+                event.stopPropagation();
+                dragging = true;
+                document.body.classList.add('sam-panel-dragging');
+
+                var point = _eventScreenPoint(event);
+                try {
+                    bridge.dragStart(point.x, point.y);
+                } catch (_) {
+                    finishDrag();
+                }
+            }
+
+            header.addEventListener('mousedown', startDrag);
+            header.addEventListener('touchstart', startDrag, { passive: false });
+            document.addEventListener('mouseup', finishDrag);
+            document.addEventListener('touchend', finishDrag);
+            document.addEventListener('touchcancel', finishDrag);
+            window.addEventListener('blur', finishDrag);
+            return true;
+        }
+
+        async function _initManager() {
+            if (!window.Jukebox || !window.Jukebox.SongActionManager) return;
+
+            var SAM = Jukebox.SongActionManager;
+
+            // 创建管理器面板 DOM
+            var panel = SAM.create();
+            document.body.appendChild(panel);
+            // 拖动由 CSS `-webkit-app-region: drag` 原生接管，无需 JS 绑定。
+
+            // 注入管理器样式
+            var style = document.createElement('style');
+            style.textContent = SAM.getStyles();
+            document.head.appendChild(style);
+
+            // SAM.getStyles() 在本模板样式之后注入；standalone 需要最后再声明一次
+            // 标题栏整块原生拖动和交互元素 no-drag，避免 PC 窗口命中区域被通用样式覆盖。
+            var standaloneStyle = document.createElement('style');
+            standaloneStyle.textContent = [
+                'body .jukebox-sam-panel {',
+                '  -webkit-app-region: no-drag !important;',
+                '  padding: 0 !important;',
+                '  cursor: default !important;',
+                '}',
+                'body .jukebox-sam-panel .sam-header {',
+                '  -webkit-app-region: drag !important;',
+                '  display: grid !important;',
+                '  grid-template-columns: auto minmax(0, 1fr) auto !important;',
+                '  align-items: center !important;',
+                '  gap: 8px !important;',
+                '  padding: 12px 12px 10px 16px !important;',
+                '  overflow: visible !important;',
+                '  cursor: grab !important;',
+                '  touch-action: none !important;',
+                '}',
+                'body .jukebox-sam-panel .sam-tabs {',
+                '  min-width: 0 !important;',
+                '  overflow: hidden !important;',
+                '}',
+                'body .jukebox-sam-panel .sam-tab {',
+                '  min-width: 0 !important;',
+                '  overflow: hidden !important;',
+                '  text-overflow: ellipsis !important;',
+                '  white-space: nowrap !important;',
+                '}',
+                'body .jukebox-sam-panel .sam-close-btn {',
+                '  width: 36px !important;',
+                '  height: 36px !important;',
+                '  min-width: 36px !important;',
+                '  box-sizing: border-box !important;',
+                '}',
+                'body .jukebox-sam-panel .sam-header:active,',
+                'body.sam-panel-dragging .jukebox-sam-panel .sam-header {',
+                '  cursor: grabbing !important;',
+                '}',
+                'body .jukebox-sam-panel .sam-title,',
+                'body .jukebox-sam-panel .sam-drag-fill {',
+                '  -webkit-app-region: drag !important;',
+                '  cursor: grab !important;',
+                '}',
+                'body .jukebox-sam-panel .sam-drag-fill {',
+                '  display: none !important;',
+                '}',
+                'body .jukebox-sam-panel button,',
+                'body .jukebox-sam-panel input,',
+                'body .jukebox-sam-panel a,',
+                'body .jukebox-sam-panel select,',
+                'body .jukebox-sam-panel textarea,',
+                'body .jukebox-sam-panel label,',
+                'body .jukebox-sam-panel [contenteditable="true"],',
+                'body .jukebox-sam-panel .sam-tab,',
+                'body .jukebox-sam-panel .sam-close-btn,',
+                'body .jukebox-sam-panel .sam-content,',
+                'body .jukebox-sam-panel .sam-item,',
+                'body .jukebox-sam-panel .sam-binding-item,',
+                'body .jukebox-sam-panel .sam-checkbox,',
+                'body .jukebox-sam-panel .sam-unbind-btn,',
+                'body .jukebox-sam-panel .sam-add-binding-btn,',
+                'body .jukebox-sam-panel .sam-click-add,',
+                'body .jukebox-sam-panel .sam-file-drop-zone {',
+                '  -webkit-app-region: no-drag !important;',
+                '}'
+            ].join('\\n');
+            document.head.appendChild(standaloneStyle);
+            _enableManagerBridgeCursorDrag(panel);
+
+            // 覆盖 hide：关闭窗口而非隐藏 DOM
+            var _prevHide = SAM.hide;
+            SAM.hide = function() {
+                try {
+                    window.close();
+                    if (!window.closed && typeof _prevHide === 'function') {
+                        _prevHide.call(SAM);
+                    }
+                } catch (e) {
+                    if (typeof _prevHide === 'function') _prevHide.call(SAM);
+                }
+            };
+
+            // 覆盖 Jukebox.loadSongs：保留原始行为，完成后通过 BroadcastChannel 通知点歌台窗口刷新
+            var _origLoadSongs = Jukebox.loadSongs;
+            var _jukeboxBC;
+            try { _jukeboxBC = new BroadcastChannel('neko-jukebox'); } catch (e) {}
+            Jukebox.loadSongs = async function() {
+                var result = await _origLoadSongs.apply(Jukebox, arguments);
+                try {
+                    if (_jukeboxBC) _jukeboxBC.postMessage({ type: 'reload' });
+                } catch (e) {}
+                return result;
+            };
+
+            // 显示管理器（SAM.create() 已调用 load，无需重复加载）
+            SAM.element.style.display = 'flex';
+            SAM.isVisible = true;
+        }
+
+        // 等待 i18n 就绪
+        var _mgrInitDone = false;
+        function _tryInitManager() {
+            if (_mgrInitDone) return;
+            if (typeof window.t === 'function' && window.i18n && window.i18n.isInitialized === true) {
+                _mgrInitDone = true;
+                clearInterval(_mgrPoll);
+                _initManager().catch(function(e) { console.error('[JukeboxManager] init failed:', e); });
+            }
+        }
+        var _mgrPoll = setInterval(function() { _tryInitManager(); }, 100);
+        setTimeout(function() {
+            clearInterval(_mgrPoll);
+            if (!_mgrInitDone) {
+                _mgrInitDone = true;
+                if (typeof window.t !== 'function') {
+                    window.t = function(key, opts) {
+                        if (typeof opts === 'string') return opts;
+                        if (opts && typeof opts === 'object') {
+                            var tpl = typeof opts.defaultValue === 'string' ? opts.defaultValue : key;
+                            return tpl.replace(/\{\{(\w+)\}\}/g, function(_, name) {
+                                return opts[name] != null ? opts[name] : '{{' + name + '}}';
+                            });
+                        }
+                        return key;
+                    };
+                }
+                _initManager().catch(function(e) { console.error('[JukeboxManager] init failed:', e); });
+            }
+        }, 3000);
+
+    </script>
+</body>
+</html>

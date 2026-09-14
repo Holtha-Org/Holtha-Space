@@ -1,0 +1,545 @@
+import contextlib
+import logging
+
+import pytest
+
+
+def test_select_lang_template_falls_back_zh_family_to_zh():
+    from main_logic.activity.llm_enrichment import _select_lang_template
+
+    # zh-TW with no zh-TW entry must fall back to the Simplified zh prompt,
+    # NOT English (regression guard for activity/open-thread enrichment).
+    zh_only = {"zh": "简体", "en": "english"}
+    assert _select_lang_template(zh_only, "zh-TW") == "简体"
+    assert _select_lang_template(zh_only, "zh") == "简体"
+    assert _select_lang_template(zh_only, "ja") == "english"
+
+    # An explicit zh-TW entry still wins over the zh fallback.
+    with_trad = {"zh": "简体", "zh-TW": "繁體", "en": "english"}
+    assert _select_lang_template(with_trad, "zh-TW") == "繁體"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("lang", "marker", "forbidden"),
+    [
+        ("zh-TW", "對話回顧助手", "对话回顾助手"),
+        ("zh-CN", "对话回顾助手", "對話回顧助手"),
+    ],
+)
+async def test_call_open_threads_keeps_the_traditional_template_for_zh_tw(
+    monkeypatch, lang, marker, forbidden,
+):
+    """Traditional open-thread detection must get the Traditional template.
+
+    This is one of the few pipelines under config/prompts/ that already carries
+    the FULL locale today: service.py's _resolve_topic_hook_locale resolves with
+    format="full", _normalize_lang deliberately preserves 'zh-TW', and
+    _select_lang_template returns the row outright when it is present.
+
+    OPEN_THREADS_PROMPTS was the only table on that pipeline still missing a
+    'zh-TW' row before the issue #2500 backfill, so Traditional users kept
+    landing on the zh-* -> zh fallback and reading Simplified. Its sibling
+    TOPIC_CANDIDATE_PROMPTS has carried the equivalent assertion for a while --
+    see test_call_topic_candidates_uses_localized_prompt_for_supported_languages
+    below.
+
+    The reverse direction is pinned too: zh-CN must not start reading the
+    Traditional row. Asserting only "contains the Traditional marker" would let
+    a regression that collapses both rows into one copy pass unnoticed.
+    """
+    from main_logic.activity import llm_enrichment
+
+    captured = {}
+
+    async def fake_invoke(prompt, *, timeout, label):
+        assert label == 'open_threads'
+        captured['prompt'] = prompt
+        return '{"open_threads": []}'
+
+    monkeypatch.setattr(llm_enrichment, "_invoke_emotion_tier", fake_invoke)
+
+    threads = await llm_enrichment.call_open_threads(
+        user_msgs=[(0.0, "那个 bug 啊……")],
+        ai_msgs=[(1.0, "嗯？")],
+        lang=lang,
+    )
+
+    assert threads == []
+    assert marker in captured['prompt']
+    assert forbidden not in captured['prompt']
+
+
+@pytest.mark.asyncio
+async def test_derive_deep_search_query_parses_json_query(monkeypatch):
+    from main_logic.activity import llm_enrichment
+
+    async def fake_capable(prompt, *, timeout, label):
+        assert "文本世界模型" in prompt
+        return '{"query": "文本世界模型 无撤回 幻觉 最新"}'
+
+    monkeypatch.setattr(llm_enrichment, "_invoke_capable_tier", fake_capable)
+
+    q = await llm_enrichment.derive_deep_search_query(
+        interest="文本世界模型的无撤回机制",
+        keywords=["文本世界模型", "幻觉"],
+        lang="zh-CN",
+    )
+    assert q == "文本世界模型 无撤回 幻觉 最新"
+
+
+@pytest.mark.asyncio
+async def test_derive_deep_search_query_none_when_model_silent(monkeypatch):
+    from main_logic.activity import llm_enrichment
+
+    async def fake_capable(prompt, *, timeout, label):
+        return None
+
+    monkeypatch.setattr(llm_enrichment, "_invoke_capable_tier", fake_capable)
+
+    q = await llm_enrichment.derive_deep_search_query(
+        interest="只有兴趣没有关键词",
+        keywords=[],
+        lang="en",
+    )
+    assert q is None
+
+
+@pytest.mark.asyncio
+async def test_call_topic_candidates_parses_model_output(monkeypatch):
+    from main_logic.activity import llm_enrichment
+
+    async def fake_invoke(prompt, *, timeout, label):
+        assert label == "topic_candidates"
+        assert "凯迪拉克" in prompt
+        return """```json
+        {
+          "topics": [
+            {
+              "interest": "想买凯迪拉克但预算压力很大",
+              "hook": "接住想买车和现实预算的冲突",
+              "opening_intent": "像朋友随口一提，不像问卷",
+              "deepening_hint": "用户接话后聊目标和现实怎么折中",
+              "relevance": 93
+            },
+            {"interest": "你好", "relevance": 10}
+          ]
+        }
+        ```"""
+
+    monkeypatch.setattr(llm_enrichment, "_invoke_emotion_tier", fake_invoke)
+
+    topics = await llm_enrichment.call_topic_candidates(
+        lang="zh-CN",
+        global_signals="- [3min前] 用户: 我想买凯迪拉克，但根本买不起\n- [0s前] 用户: 毕业一年才攒了4600",
+    )
+
+    assert topics == [
+        {
+            "interest": "想买凯迪拉克但预算压力很大",
+            "keywords": [],
+            "relevance": 93,
+            "risk": 20,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_call_topic_candidates_passes_global_signals_and_keeps_keywords(monkeypatch):
+    from main_logic.activity import llm_enrichment
+
+    captured = {}
+
+    async def fake_invoke(prompt, *, timeout, label):
+        captured["prompt"] = prompt
+        return """
+        {
+          "topics": [
+            {
+              "interest": "用户把买车和生活自由感联系在一起",
+              "hook": "先接住不想被人生流程推着走",
+              "opening_intent": "短一点，像随口想起来",
+              "deepening_hint": "用户接话后再聊自由感和现实成本",
+              "why_now": "多次提到买车、预算和不想被固定流程推着走",
+              "search_query": "年轻人 买车 通勤 养车 成本",
+              "keywords": ["买车", "自由感"],
+              "relevance": 91,
+              "risk": 18
+            }
+          ]
+        }
+        """
+
+    monkeypatch.setattr(llm_enrichment, "_invoke_emotion_tier", fake_invoke)
+
+    topics = await llm_enrichment.call_topic_candidates(
+        lang="zh-CN",
+        global_signals="- [5min前] 用户: 又聊到买车\n- [1min前] 用户: 买车让我觉得能自由点",
+    )
+
+    assert "买车让我觉得能自由点" in captured["prompt"]
+    assert topics == [
+        {
+            "interest": "用户把买车和生活自由感联系在一起",
+            "keywords": ["买车", "自由感"],
+            "relevance": 91,
+            "risk": 18,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_call_topic_candidates_skips_low_relevance(monkeypatch):
+    from main_logic.activity import llm_enrichment
+
+    async def fake_invoke(prompt, *, timeout, label):
+        return """
+        {
+          "topics": [
+            {
+              "interest": "一个相关度还不够的薄话题",
+              "hook": "先不要开口",
+              "relevance": 62,
+              "risk": 10
+            }
+          ]
+        }
+        """
+
+    monkeypatch.setattr(llm_enrichment, "_invoke_emotion_tier", fake_invoke)
+
+    topics = await llm_enrichment.call_topic_candidates(
+        lang="zh-CN",
+        global_signals="- [2min前] 用户: 还没聊开，就随口提了句",
+    )
+
+    assert topics == []
+
+
+@pytest.mark.asyncio
+async def test_call_topic_candidates_skips_high_risk(monkeypatch):
+    from main_logic.activity import llm_enrichment
+
+    async def fake_invoke(prompt, *, timeout, label):
+        return """
+        {
+          "topics": [
+            {
+              "interest": "一个相关但触碰风险偏高的话题",
+              "relevance": 90,
+              "risk": 80
+            }
+          ]
+        }
+        """
+
+    monkeypatch.setattr(llm_enrichment, "_invoke_emotion_tier", fake_invoke)
+
+    topics = await llm_enrichment.call_topic_candidates(
+        lang="zh-CN",
+        global_signals="- [1min前] 用户: 顺口提了一句不太想被追问的事",
+    )
+
+    # relevance clears the bar but risk > 65 must still reject — guards the
+    # risk gate against regression now that thresholds live only in code.
+    assert topics == []
+
+
+@pytest.mark.asyncio
+async def test_call_topic_candidates_keeps_short_cjk_interests(monkeypatch):
+    from main_logic.activity import llm_enrichment
+
+    async def fake_invoke(prompt, *, timeout, label):
+        return """
+        {
+          "topics": [
+            {
+              "interest": "转职",
+              "hook": "接住用户对转职的犹豫",
+              "relevance": 88,
+              "risk": 10
+            }
+          ]
+        }
+        """
+
+    monkeypatch.setattr(llm_enrichment, "_invoke_emotion_tier", fake_invoke)
+
+    topics = await llm_enrichment.call_topic_candidates(
+        lang="zh-CN",
+        global_signals="- [4min前] 用户: 我最近一直在想转职\n- [0s前] 用户: 越来越认真在考虑",
+    )
+
+    assert topics and topics[0]["interest"] == "转职"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("lang", "marker"),
+    [
+        ("ja", "ユーザーの言語で"),
+        ("ko", "사용자 언어로"),
+        ("es", "en el idioma del usuario"),
+        ("pt", "no idioma do usuario"),
+        ("ru", "на языке пользователя"),
+        ("zh-TW", "使用繁體中文"),
+    ],
+)
+async def test_call_topic_candidates_uses_localized_prompt_for_supported_languages(
+    monkeypatch,
+    lang,
+    marker,
+):
+    from main_logic.activity import llm_enrichment
+
+    captured = {}
+
+    async def fake_invoke(prompt, *, timeout, label):
+        captured["prompt"] = prompt
+        return '{"topics":[]}'
+
+    monkeypatch.setattr(llm_enrichment, "_invoke_emotion_tier", fake_invoke)
+
+    topics = await llm_enrichment.call_topic_candidates(
+        lang=lang,
+        global_signals="- [2min ago] User: I keep thinking about wanting a new phone",
+    )
+
+    assert topics == []
+    assert marker in captured["prompt"]
+    assert "Output strict JSON" not in captured["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_invoke_emotion_tier_uses_project_message_classes(monkeypatch):
+    from main_logic.activity import llm_enrichment
+    from utils.llm_client import HumanMessage
+
+    captured = {}
+
+    class FakeConfigManager:
+        async def aget_model_api_config(self, name, *, core_config=None):
+            return self.get_model_api_config(name)
+
+        def get_model_api_config(self, name):
+            assert name == "emotion"
+            return {
+                "model": "fake-emotion-model",
+                "api_key": "fake-key",
+                "base_url": "https://example.invalid/v1",
+            }
+
+    class FakeResponse:
+        content = '{"topics":[]}'
+
+    class FakeLLM:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def ainvoke(self, messages):
+            captured["messages"] = messages
+            return FakeResponse()
+
+    def fake_create_chat_llm(*args, **kwargs):
+        return FakeLLM()
+
+    monkeypatch.setattr(
+        "utils.config_manager.get_config_manager",
+        lambda: FakeConfigManager(),
+    )
+    monkeypatch.setattr("utils.llm_client.create_chat_llm", fake_create_chat_llm)
+    monkeypatch.setattr("utils.token_tracker.set_call_type", lambda value: None)
+
+    raw = await llm_enrichment._invoke_emotion_tier(
+        "提炼一个深话题",
+        timeout=1.0,
+        label="topic_candidates",
+    )
+
+    assert raw == '{"topics":[]}'
+    assert isinstance(captured["messages"][0], HumanMessage)
+    assert captured["messages"][0].content == "提炼一个深话题"
+
+
+class _WarningSink(logging.Handler):
+    def __init__(self):
+        super().__init__(level=logging.DEBUG)
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
+@contextlib.contextmanager
+def _capture_enrichment_logs():
+    """Collect everything the enrichment logger emits, at any level.
+
+    Deliberately not clamped to WARNING: these tests assert that conversation
+    text reaches NO log line, so a regression that demotes the leak back to
+    logger.debug has to fail here rather than slip under the level filter.
+    """
+    from main_logic.activity import llm_enrichment
+
+    # The module's own logger object, not getLogger(__name__): the module is
+    # deliberately named into the "N.E.K.O.Main" tree so its records reach the
+    # service handlers, and looking it up by module path would silently attach
+    # to a different, handler-less logger.
+    log = llm_enrichment.logger
+    sink = _WarningSink()
+    prior_level, prior_propagate = log.level, log.propagate
+    llm_enrichment._failure_log_state.clear()
+    log.addHandler(sink)
+    log.setLevel(logging.DEBUG)
+    try:
+        yield sink
+    finally:
+        log.removeHandler(sink)
+        log.setLevel(prior_level)
+        log.propagate = prior_propagate
+        llm_enrichment._failure_log_state.clear()
+
+
+@pytest.mark.asyncio
+async def test_enrichment_failure_log_never_carries_the_model_reply(monkeypatch):
+    """The reply is a rewrite of the user's own turns — it cannot reach a log.
+
+    This used to be `logger.debug('...: %r', raw[:200])`, i.e. 200 characters of
+    conversation-derived text on every malformed reply.
+    """
+    from main_logic.activity import llm_enrichment
+
+    secret = "用户说他下周要去梅奥诊所复查"
+
+    async def fake_invoke(prompt, *, timeout, label):
+        return f"这不是 JSON。{secret}"
+
+    monkeypatch.setattr(llm_enrichment, "_invoke_emotion_tier", fake_invoke)
+
+    with _capture_enrichment_logs() as sink:
+        result = await llm_enrichment.call_topic_candidates(
+            lang="zh-CN",
+            global_signals="- [1min前] 用户: 我最近一直在纠结要不要换工作",
+        )
+
+    assert result is None
+    messages = [r.getMessage() for r in sink.records]
+    assert any("reply_not_json_object" in m for m in messages), messages
+    assert not any(secret in m for m in messages), messages
+    assert not any("这不是 JSON" in m for m in messages), messages
+    # 提示语本身也是对话原文拼出来的，同样不能出现。
+    assert not any("换工作" in m for m in messages), messages
+
+
+def test_failure_detail_reports_the_exception_class_not_its_message():
+    from main_logic.activity import llm_enrichment
+
+    class _ProviderError(Exception):
+        status_code = 400
+
+    # 供应商 400 的 message 经常把请求体（也就是对话）原样回显出来。
+    leaky = _ProviderError("invalid request body: 我最近一直在纠结要不要换工作")
+    detail = llm_enrichment._failure_detail(leaky)
+    assert detail == "_ProviderError HTTP 400"
+    assert "换工作" not in detail
+
+    class _Response:
+        status_code = 429
+
+    class _WrappedError(Exception):
+        response = _Response()
+
+    assert llm_enrichment._failure_detail(_WrappedError("...")) == "_WrappedError HTTP 429"
+    assert llm_enrichment._failure_detail(ValueError("我最近一直在纠结")) == "ValueError"
+
+
+@pytest.mark.asyncio
+async def test_enrichment_failure_log_throttles_repeats_of_the_same_reason(monkeypatch):
+    """These calls hang off a 20s heartbeat: one line per reason per window.
+
+    Without the throttle, promoting these from debug to warning would just move
+    the flood the topic pipeline was already producing from INFO to WARNING.
+    """
+    from main_logic.activity import llm_enrichment
+
+    async def fake_invoke(prompt, *, timeout, label):
+        return "not json at all"
+
+    monkeypatch.setattr(llm_enrichment, "_invoke_emotion_tier", fake_invoke)
+
+    with _capture_enrichment_logs() as sink:
+        for _ in range(12):
+            await llm_enrichment.call_topic_candidates(
+                lang="zh-CN", global_signals="- [1min前] 用户: 换工作的事",
+            )
+
+        first_round = [r.getMessage() for r in sink.records]
+        assert len(first_round) == 1, first_round
+        assert "11 more suppressed" not in first_round[0]
+
+        # 窗口翻篇后重新放行一条，并把期间压掉的次数带出来。
+        monkeypatch.setattr(llm_enrichment, "_FAILURE_LOG_INTERVAL_SECONDS", 0.0)
+        await llm_enrichment.call_topic_candidates(
+            lang="zh-CN", global_signals="- [1min前] 用户: 换工作的事",
+        )
+
+    messages = [r.getMessage() for r in sink.records]
+    assert len(messages) == 2, messages
+    assert "11 more suppressed" in messages[1], messages[1]
+
+
+@pytest.mark.asyncio
+async def test_enrichment_failure_log_separates_reasons_and_labels(monkeypatch):
+    """One throttle bucket per (label, reason) — a new failure mode is not hidden."""
+    from main_logic.activity import llm_enrichment
+
+    with _capture_enrichment_logs() as sink:
+        llm_enrichment._report_failure("topic_candidates", "emotion_call_timed_out", "8.0s")
+        llm_enrichment._report_failure("topic_candidates", "emotion_call_timed_out", "8.0s")
+        llm_enrichment._report_failure("topic_candidates", "reply_not_json_object")
+        llm_enrichment._report_failure("activity_guess", "emotion_call_timed_out", "8.0s")
+
+    messages = [r.getMessage() for r in sink.records]
+    assert len(messages) == 3, messages
+    assert all(r.levelno == logging.WARNING for r in sink.records)
+    assert "topic_candidates" in messages[0] and "emotion_call_timed_out" in messages[0]
+    assert "8.0s" in messages[0]
+    assert "reply_not_json_object" in messages[1]
+    assert "activity_guess" in messages[2]
+
+
+def test_enrichment_failure_reports_reach_the_main_service_handlers():
+    """The whole point of these warnings is that they land in the log file.
+
+    setup_logging(service_name="Main") installs handlers on "N.E.K.O.Main" with
+    propagate=False and installs nothing on root, so a logger named after
+    __name__ reaches no handler: its records fall through to
+    logging.lastResort — bare text on stderr, never the log file. Asserting the
+    logger's *name* would be weaker than the claim; this drives a real record
+    through and checks a handler on the service logger receives it.
+    """
+    from main_logic.activity import llm_enrichment
+
+    records = []
+
+    class _Sink(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    main_logger = logging.getLogger("N.E.K.O.Main")
+    sink = _Sink()
+    prior_level = main_logger.level
+    main_logger.addHandler(sink)
+    main_logger.setLevel(logging.DEBUG)
+    llm_enrichment._failure_log_state.clear()
+    try:
+        llm_enrichment._report_failure("topic_candidates", "emotion_call_timed_out", "8.0s")
+    finally:
+        main_logger.removeHandler(sink)
+        main_logger.setLevel(prior_level)
+        llm_enrichment._failure_log_state.clear()
+
+    messages = [r.getMessage() for r in records]
+    assert any("emotion_call_timed_out" in m for m in messages), messages

@@ -1,0 +1,484 @@
+"""Bridge: message_plane PUB → agent event bus (AGENT_PUSH_ADDR).
+
+Subscribes to the message_plane PUB endpoint, watches for v2 push_message
+payloads, and translates them into the legacy ``proactive_message`` /
+``music_play_url`` / ``music_allowlist_add`` events that main_server's
+``handle_agent_event`` already understands.
+
+The v2 schema (``visibility`` + ``ai_behavior`` + ``parts``) is the single
+source of truth — see :mod:`plugin.sdk.shared.core.push_message_schema`.
+Legacy ``message_type`` payloads still arrive when an older plugin is
+loaded; the SDK adapter (``plugin.core.context.PluginContext.push_message``)
+runs the v1→v2 translation client-side so by the time the payload reaches
+this bridge it always has v2 fields populated.
+
+Flow: plugin ─(ZMQ ingest)→ message_plane ─(PUB)→ **this bridge** ─(PUSH)→ main_server PULL
+"""
+from __future__ import annotations
+
+import json
+import math
+import os
+import threading
+import time
+from typing import Any
+
+from plugin.logging_config import get_logger
+from plugin.sdk.shared.core.push_message_schema import AI_BEHAVIOR_VALUES
+
+try:
+    import zmq
+except Exception:  # pragma: no cover
+    zmq = None
+
+logger = get_logger("server.messaging.proactive_bridge")
+
+
+# Map ai_behavior → the legacy delivery_mode the existing main_server
+# proactive_message handler understands: respond → "proactive", read →
+# "passive", blind → "silent" (LLM channel skipped).
+#
+# ``visibility`` is NOT consulted here, despite the signature: it decides
+# where the plugin's own parts render, which is a separate question the
+# host answers on its own. Chat rendering is gated on "chat" membership in
+# ``_handle_agent_event``; the HUD agent_notification is gated on "hud"
+# membership there too, so a proactive_message no longer implies a HUD
+# toast. The parameter is kept so the call site reads as the full
+# (visibility, ai_behavior) pair the schema defines.
+def _resolve_delivery_mode(visibility: list[str], ai_behavior: str) -> str:
+    if ai_behavior == "respond":
+        return "proactive"
+    if ai_behavior == "read":
+        return "passive"
+    return "silent"
+
+
+def _positive_finite_float(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        normalized = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if not math.isfinite(normalized) or normalized <= 0.0:
+        return None
+    return normalized
+
+
+def _aggregate_text_parts(parts: list[dict[str, Any]]) -> str:
+    """Concatenate ``type=text`` parts into a single string."""
+    pieces: list[str] = []
+    for p in parts:
+        if not isinstance(p, dict):
+            continue
+        if p.get("type") == "text":
+            t = p.get("text")
+            if isinstance(t, str) and t:
+                pieces.append(t)
+    return "\n".join(pieces).strip()
+
+
+def _media_parts(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Filter for image/audio/video parts.
+
+    The result is only used to decide whether this push carries a payload
+    worth forwarding (``has_ai_payload``). The canonical ``parts`` list is
+    what actually rides on the event; the host derives its own model and
+    chat views from it.
+    """
+    out: list[dict[str, Any]] = []
+    for p in parts:
+        if not isinstance(p, dict):
+            continue
+        if p.get("type") in ("image", "audio", "video"):
+            entry: dict[str, Any] = {"type": p.get("type")}
+            if isinstance(p.get("binary_base64"), str):
+                entry["binary_base64"] = p["binary_base64"]
+            if isinstance(p.get("url"), str):
+                entry["url"] = p["url"]
+            if isinstance(p.get("mime"), str):
+                entry["mime"] = p["mime"]
+            out.append(entry)
+    return out
+
+
+def _ui_action_parts(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [p for p in parts if isinstance(p, dict) and p.get("type") == "ui_action"]
+
+
+def _resolve_agent_push_addr() -> str:
+    raw = os.getenv("NEKO_ZMQ_AGENT_PUSH_PORT", "").strip()
+    if raw:
+        try:
+            port = int(raw)
+            if 1 <= port <= 65535:
+                return f"tcp://127.0.0.1:{port}"
+        except (ValueError, TypeError):
+            pass
+    return "tcp://127.0.0.1:48962"
+
+
+class ProactiveBridge:
+    """Daemon thread that relays plugin push_message payloads to main_server."""
+
+    def __init__(self) -> None:
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        # SUB 真正连上并订阅之后才置位。启动顺序要用它：autostart 插件可以在
+        # startup 钩子里 push_message()，而 PUB 对缺席的订阅方是直接丢弃 ——
+        # 那扇窗口里推的消息角色永远不会说，push_message() 却已经回了
+        # submitted=True。只把 bridge 挪到插件前面只是让计时更早开始，窗口
+        # 本身还在（下面那个 1 秒等待就在窗口里）。
+        self._subscribed = threading.Event()
+
+    def start(self) -> None:
+        if zmq is None:
+            logger.warning("pyzmq not available; proactive bridge disabled")
+            return
+        if self._thread is not None and self._thread.is_alive():
+            return
+        # 新事件，而不是 clear() 掉共用的那个：stop() 的 join 是有界的，超时时
+        # 旧线程可能还在收尾。清掉它正在等的事件会把它拉回收发循环——订阅的
+        # 还是退休前那个 PUB 端点，而且和新线程一起往同一个 PUSH 上投递。它
+        # 自己那个事件保持置位，于是按自己的节奏退出，且不会被叫回来。
+        self._stop = threading.Event()
+        # 必须清：stop() 会置位 _subscribed 来唤醒等待者，重启后不清的话
+        # wait_until_subscribed() 会拿着上一条命的事件立刻返回，窗口原样回来。
+        self._subscribed.clear()
+        t = threading.Thread(
+            target=self._run, args=(self._stop,), daemon=True, name="proactive-bridge"
+        )
+        self._thread = t
+        t.start()
+        logger.info("proactive bridge started")
+
+    def wait_until_subscribed(self, timeout: float) -> bool:
+        """Block until the SUB socket is connected and subscribed.
+
+        Returns False on timeout, and on a bridge that was never started — the
+        caller must not be blocked by a bridge that is disabled or already
+        dead, only by one that is still coming up.
+
+        ⚠️ 这不是数学上的关闭。ZMQ 的 SUBSCRIBE 返回不代表 PUB 端已经处理完
+        这条订阅（经典的 slow joiner），所以极窄的一段仍在。要真正关死得让
+        bridge 起来后补读一次 store 并按 message_id 去重 —— 那会引入重复投递
+        的风险（角色把同一句说两遍），不在这次范围内。
+        """
+        t = self._thread
+        if t is None or not t.is_alive():
+            return self._subscribed.is_set()
+        return self._subscribed.wait(timeout)
+
+    def is_alive(self) -> bool:
+        """Whether the bridge thread is running.
+
+        ``wait_until_subscribed`` answers ``False`` both for a bridge that is
+        still coming up and for one that never started or has died, and those
+        want opposite handling: the first heals on its own, the second recovers
+        only if something restarts it. Callers that must tell them apart ask here.
+        """
+        t = self._thread
+        return t is not None and t.is_alive()
+
+    def stop(self) -> None:
+        self._stop.set()
+        # 醒掉任何在等订阅的人：bridge 停了就不会再有订阅了，让它们继续跑，
+        # 别把关停变成一次 timeout 长的挂起。
+        self._subscribed.set()
+        t = self._thread
+        self._thread = None
+        if t is not None and t.is_alive():
+            t.join(timeout=2.0)
+
+    def _run(self, stop: threading.Event) -> None:
+        # ``stop`` is THIS thread's event, handed over at start. Never
+        # ``self._stop`` -- that name is rebound for each new thread, so reading
+        # it here would make a retired thread obey its successor's lifetime.
+        from plugin.settings import MESSAGE_PLANE_ZMQ_PUB_ENDPOINT
+
+        pub_endpoint = os.getenv(
+            "NEKO_MESSAGE_PLANE_ZMQ_PUB_ENDPOINT",
+            str(MESSAGE_PLANE_ZMQ_PUB_ENDPOINT),
+        )
+        agent_push_addr = _resolve_agent_push_addr()
+
+        # Brief wait for message_plane PUB to bind before we connect.
+        time.sleep(1.0)
+        if stop.is_set():
+            return
+
+        ctx = zmq.Context.instance()
+        sub_sock = ctx.socket(zmq.SUB)
+        sub_sock.linger = 0
+        sub_sock.setsockopt(zmq.RCVTIMEO, 1000)
+        sub_sock.connect(pub_endpoint)
+        sub_sock.setsockopt_string(zmq.SUBSCRIBE, "messages.")
+        self._subscribed.set()
+
+        push_sock = ctx.socket(zmq.PUSH)
+        push_sock.linger = 1000
+        push_sock.connect(agent_push_addr)
+
+        logger.info(
+            "proactive bridge connected: sub={} push={}",
+            pub_endpoint,
+            agent_push_addr,
+        )
+
+        try:
+            while not stop.is_set():
+                try:
+                    parts_raw = sub_sock.recv_multipart()
+                except zmq.Again:
+                    continue
+                except Exception as e:
+                    if not stop.is_set():
+                        logger.debug("proactive bridge recv error: {}", e)
+                        time.sleep(0.1)
+                    continue
+
+                if len(parts_raw) < 2:
+                    continue
+
+                try:
+                    event = json.loads(parts_raw[1])
+                except Exception:
+                    continue
+
+                payload = event.get("payload") if isinstance(event, dict) else None
+                if not isinstance(payload, dict):
+                    continue
+
+                try:
+                    self._dispatch(payload, push_sock)
+                except Exception as e:
+                    logger.error("Error dispatching push payload: {}", e)
+                    continue
+        finally:
+            try:
+                sub_sock.close(linger=0)
+            except Exception:
+                pass
+            try:
+                push_sock.close(linger=0)
+            except Exception:
+                pass
+
+    def _dispatch(self, payload: dict[str, Any], push_sock: Any) -> None:
+        """Translate a v2 (or legacy-shimmed) push payload into legacy
+        agent-event-bus events and PUSH them to main_server.
+
+        A single push_message can produce multiple events:
+
+        * ``proactive_message`` (text + media for AI session, including
+          delivery_mode silent for HUD-only notifications)
+        * ``music_play_url`` / ``music_allowlist_add`` (UI side effects
+          carried as ui_action parts)
+
+        Empty plumbing — no parts and no actionable signal — is dropped
+        with a debug log so plugin authors notice on first run.
+        """
+        plugin_id = payload.get("plugin_id", "")
+        timestamp = payload.get("time", "")
+        raw_metadata = payload.get("metadata")
+        metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+        expires_in_s = _positive_finite_float(metadata.get("expires_in_s"))
+        if expires_in_s is None:
+            metadata.pop("expires_in_s", None)
+        else:
+            metadata["expires_in_s"] = expires_in_s
+
+        # v2 fields are guaranteed by the SDK adapter's translate step,
+        # but accept legacy shapes too for safety.
+        schema = payload.get("schema")
+        visibility = payload.get("visibility") if isinstance(payload.get("visibility"), list) else []
+        ai_behavior = payload.get("ai_behavior")
+        if ai_behavior not in AI_BEHAVIOR_VALUES:
+            ai_behavior = "respond"
+        parts = payload.get("parts") if isinstance(payload.get("parts"), list) else []
+        # Proactive-delivery hints (priority ordering + coalescing). Carried
+        # through to the main_server callback so ProactiveDeliveryManager can
+        # order/coalesce. Repo-wide convention: HIGHER number = more
+        # important (bilibili gift/SC=9, memo reminder=8). A missing or
+        # unparseable priority falls back to 0 = least important, so a cue
+        # that never set one cannot preempt a cue that did. Nothing rescales
+        # it downstream — main_logic.proactive_delivery.effective_priority
+        # just int()s the value and the queue sorts by (-priority, seq).
+        try:
+            # OverflowError: plugin payload is boundary input; JSON
+            # Infinity/-Infinity → non-finite float → int() raises. Must not
+            # let a malformed priority drop the whole message at the bridge.
+            priority = int(payload.get("priority", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            priority = 0
+        coalesce_key = payload.get("coalesce_key")
+        if not isinstance(coalesce_key, str):
+            coalesce_key = ""
+
+        target_lanlan = payload.get("target_lanlan") or metadata.get("target_lanlan") or None
+
+        events_out: list[dict[str, Any]] = []
+
+        # ---- ui_action parts → frontend control events ----
+        for ui in _ui_action_parts(parts):
+            action = ui.get("action")
+            if action == "media_play_url":
+                url = ui.get("url") or metadata.get("url")
+                if not isinstance(url, str) or not url.strip():
+                    logger.debug(
+                        "ui_action=media_play_url missing url; plugin={}",
+                        plugin_id,
+                    )
+                    continue
+                events_out.append(
+                    {
+                        "event_type": "music_play_url",
+                        "lanlan_name": target_lanlan,
+                        "url": url,
+                        "name": ui.get("name") or metadata.get("name"),
+                        "artist": ui.get("artist") or metadata.get("artist"),
+                        "source": plugin_id,
+                        "timestamp": timestamp,
+                    }
+                )
+            elif action == "media_allowlist_add":
+                domains = ui.get("domains") or metadata.get("domains") or []
+                http_urls = ui.get("http_urls") or metadata.get("http_urls") or []
+                if not isinstance(domains, list):
+                    domains = []
+                if not isinstance(http_urls, list):
+                    http_urls = []
+                if not domains and not http_urls:
+                    logger.debug(
+                        "ui_action=media_allowlist_add missing domains/http_urls; plugin={}",
+                        plugin_id,
+                    )
+                    continue
+                events_out.append(
+                    {
+                        "event_type": "music_allowlist_add",
+                        "lanlan_name": target_lanlan,
+                        "domains": list(domains),
+                        "http_urls": list(http_urls),
+                        "source": plugin_id,
+                        "timestamp": timestamp,
+                    }
+                )
+            elif action == "jukebox_control":
+                jukebox_action = ui.get("jukebox_action")
+                if not isinstance(jukebox_action, str) or not jukebox_action.strip():
+                    logger.debug(
+                        "ui_action=jukebox_control missing action; plugin={}",
+                        plugin_id,
+                    )
+                    continue
+                events_out.append(
+                    {
+                        "event_type": "jukebox_control",
+                        "lanlan_name": target_lanlan,
+                        "action": jukebox_action,
+                        "query": ui.get("query"),
+                        "value": ui.get("value"),
+                        "mode": ui.get("mode"),
+                        "source": plugin_id,
+                        "timestamp": timestamp,
+                    }
+                )
+            else:
+                logger.warning(
+                    "ui_action with unknown action={!r}; plugin={}",
+                    action, plugin_id,
+                )
+
+        # ---- text + media parts → proactive_message (or HUD-only) ----
+        text = _aggregate_text_parts(parts)
+        # Keep the historical aggregate-once cleanup for the model/callback
+        # text. Canonical parts remain untouched for verbatim chat rendering.
+        if text:
+            try:
+                from utils.result_parser import parse_push_message_content
+
+                text = parse_push_message_content(text)
+            except Exception as exc:
+                logger.debug(
+                    "parse_push_message_content failed (fallback to raw): {}",
+                    exc,
+                )
+        media = _media_parts(parts)
+        has_ai_payload = bool(text) or bool(media)
+
+        if has_ai_payload or "hud" in visibility:
+            delivery_mode = _resolve_delivery_mode(visibility, ai_behavior)
+            proactive_event: dict[str, Any] = {
+                "event_type": "proactive_message",
+                "lanlan_name": target_lanlan,
+                "text": text or "",
+                "summary": text or "",
+                "detail": text or "",
+                "channel": f"plugin:{plugin_id}" if plugin_id else "plugin",
+                "task_id": metadata.get("task_id", ""),
+                "success": True,
+                "status": "completed",
+                "delivery_mode": delivery_mode,
+                "source_kind": "plugin",
+                "source_name": str(plugin_id) if plugin_id else "",
+                "timestamp": timestamp,
+                "metadata": metadata,
+                # Preserve canonical order until the final consumer.  The
+                # main server derives text/media views for its legacy paths,
+                # but chat rendering must not turn image→caption→image into
+                # caption→image→image.  Carrying one canonical list also
+                # avoids duplicating inline base64 data in this ZMQ frame.
+                "parts": parts,
+                "visibility": list(visibility),
+                "ai_behavior": ai_behavior,
+                "priority": priority,
+                "coalesce_key": coalesce_key,
+            }
+            if expires_in_s is not None:
+                proactive_event["expires_in_s"] = expires_in_s
+            # delivery_mode="silent" (ai_behavior=blind) tells the
+            # proactive_message handler to skip the LLM injection. Whether a
+            # HUD agent_notification still fires is decided separately, by
+            # "hud" membership in visibility — blind + visibility=["chat"]
+            # renders the parts in chat and stays out of the HUD, and
+            # blind + visibility=[] produces no user-facing output at all.
+            events_out.append(proactive_event)
+
+        if not events_out:
+            logger.debug(
+                "push payload produced no events: plugin={} schema={} parts={}",
+                plugin_id, schema, len(parts),
+            )
+            return
+
+        for ev in events_out:
+            try:
+                push_sock.send_json(ev, zmq.NOBLOCK)
+                logger.info(
+                    "proactive bridge forwarded: plugin={} event={}",
+                    plugin_id, ev.get("event_type"),
+                )
+            except Exception as e:
+                logger.warning("proactive bridge push failed: {}", e)
+
+
+_bridge = ProactiveBridge()
+
+
+def start_proactive_bridge() -> None:
+    _bridge.start()
+
+
+def wait_for_proactive_subscriber(timeout: float) -> bool:
+    """Wait for the bridge's SUB socket before anything may publish."""
+    return _bridge.wait_until_subscribed(timeout)
+
+
+def proactive_bridge_is_alive() -> bool:
+    """Whether the bridge thread is running. See ``ProactiveBridge.is_alive``."""
+    return _bridge.is_alive()
+
+
+def stop_proactive_bridge() -> None:
+    _bridge.stop()

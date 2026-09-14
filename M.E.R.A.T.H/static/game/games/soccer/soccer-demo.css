@@ -1,0 +1,487 @@
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #111; cursor: crosshair; user-select: none; }
+  canvas#game { display: block; position: fixed; inset: 0; z-index: 0; }
+  canvas#debug { display: block; position: fixed; inset: 0; z-index: 20; pointer-events: none; }
+  /* 默认气泡。未来替换成美术素材时整个 DOM 换掉即可，数据走 SoccerDemo.onSpeak 钩子 */
+  .soccer-speech-bubble {
+    position: fixed; z-index: 30; pointer-events: none;
+    transform: translate(-50%, -100%);
+    background: rgba(255,255,255,0.96); color: #222;
+    padding: 8px 14px; border-radius: 14px;
+    font: 14px/1.4 "Segoe UI", "PingFang SC", sans-serif;
+    max-width: 260px; text-align: center;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.25);
+    opacity: 0; transition: opacity 0.18s ease-out, transform 0.22s ease-out;
+    white-space: pre-wrap;
+  }
+  .soccer-speech-bubble.show { opacity: 1; transform: translate(-50%, calc(-100% - 6px)); }
+  .soccer-speech-bubble::after {
+    content: ''; position: absolute; left: 50%; bottom: -7px;
+    transform: translateX(-50%);
+    border-left: 8px solid transparent; border-right: 8px solid transparent;
+    border-top: 8px solid rgba(255,255,255,0.96);
+  }
+  .soccer-player-speech-bubble {
+    background: rgba(221, 242, 255, 0.97);
+    border: 1px solid rgba(61, 151, 211, 0.42);
+    color: #17384f;
+  }
+  .soccer-player-speech-bubble::after { border-top-color: rgba(221, 242, 255, 0.97); }
+  #ai-speech-bubble[data-source-label]::before {
+    content: attr(data-source-label);
+    position: absolute; left: 10px; top: -20px;
+    color: rgba(255,255,255,0.88);
+    background: rgba(0,0,0,0.5);
+    padding: 2px 7px; border-radius: 999px;
+    font: 11px/1.2 "Segoe UI", "PingFang SC", sans-serif;
+    white-space: nowrap;
+  }
+  #ai-speech-bubble[data-mood="angry"] { background: #ffe0e0; }
+  #ai-speech-bubble[data-mood="angry"]::after { border-top-color: #ffe0e0; }
+  #ai-speech-bubble[data-mood="happy"] { background: #fff5c2; }
+  #ai-speech-bubble[data-mood="happy"]::after { border-top-color: #fff5c2; }
+  #ai-speech-bubble[data-mood="sad"] { background: #e0e8f0; color: #667; }
+  #ai-speech-bubble[data-mood="sad"]::after { border-top-color: #e0e8f0; }
+  #ai-speech-bubble[data-mood="surprised"] { background: #fff; border: 2px solid #f08; }
+  #ai-speech-bubble[data-mood="surprised"]::after { border-top-color: #fff; }
+  #player-vrm-container,
+  #ai-l2d-container {
+    position: fixed;
+    left: 0; top: 0;
+    width: 200px; height: 300px;
+    pointer-events: none !important;
+    z-index: 10;
+    will-change: transform;
+    transform: translate3d(-9999px, -9999px, 0);
+  }
+  #player-vrm-container *, #ai-l2d-container * { pointer-events: none !important; }
+  #player-vrm-container canvas, #ai-l2d-container canvas { width: 100%; height: 100%; display: block; }
+  .soccer-extended-avatar { position: absolute; inset: 0; width: 100%; height: 100%; overflow: hidden; }
+  .soccer-extended-avatar[hidden] { display: none !important; }
+  #soccer-pngtuber-container .pngtuber-image,
+  #soccer-pngtuber-container .pngtuber-layered-canvas { width: 100%; height: 100%; object-fit: contain; object-position: center bottom; }
+  #hint {
+    position: fixed; left: 12px; bottom: 12px; z-index: 20;
+    color: rgba(255,255,255,0.7); font: 12px/1.4 sans-serif;
+    pointer-events: none;
+  }
+  #status {
+    position: fixed; right: 12px; bottom: 12px; z-index: 20;
+    color: rgba(255,255,255,0.8); font: 12px/1.4 sans-serif;
+    background: rgba(0,0,0,0.4); padding: 6px 10px; border-radius: 4px;
+    pointer-events: none;
+  }
+  #controls {
+    /* The settings surface stays above the start overlay and attaches to the
+       persistent top-right settings button. */
+    position: fixed; right: 12px; top: 56px; z-index: 110;
+    width: min(360px, calc(100vw - 24px));
+    max-height: calc(100vh - 68px); overflow: auto;
+    box-sizing: border-box;
+    color: rgba(255,255,255,0.85); font: 13px/1.4 sans-serif;
+    background: rgba(12,24,19,0.94); padding: 10px 12px 12px; border-radius: 8px;
+    border: 1px solid rgba(255,255,255,0.16);
+    box-shadow: 0 12px 32px rgba(0,0,0,0.34);
+    user-select: none; -webkit-user-select: none;
+    pointer-events: auto;
+    animation: settings-panel-enter 150ms ease-out;
+  }
+  #controls[hidden] { display: none; }
+  #controls label { cursor: pointer; display: flex; align-items: center; gap: 6px; }
+  #controls input[type="checkbox"] { cursor: pointer; width: 15px; height: 15px; }
+  #controls .settings-checkbox-row {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr);
+    align-items: center;
+    gap: 7px;
+    min-height: 20px;
+    color: rgba(255,255,255,0.9);
+  }
+  #controls .settings-checkbox-row input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    accent-color: #8fd3ff;
+  }
+  #settings-panel-title {
+    color: rgba(255,255,255,0.96); font-weight: 650; font-size: 14px;
+    padding: 1px 0 8px;
+  }
+  .settings-group {
+    display: grid; gap: 7px; padding: 9px 0;
+    border-top: 1px solid rgba(255,255,255,0.16);
+  }
+  .settings-group[hidden] { display: none; }
+  .settings-group-title {
+    color: rgba(255,255,255,0.62); font-size: 11px; font-weight: 650;
+    letter-spacing: 0.08em; text-transform: uppercase;
+  }
+  #game-voice-chat-control {
+    display: flex; align-items: center; gap: 9px;
+    margin-bottom: 7px; padding-bottom: 7px;
+    border-bottom: 1px solid rgba(255,255,255,0.18);
+  }
+  #game-voice-chat-button {
+    position: relative; flex: 0 0 44px;
+    width: 44px; height: 44px; padding: 0;
+    border: 0; border-radius: 50%; background: transparent;
+    cursor: pointer; transition: transform 120ms ease, opacity 120ms ease;
+  }
+  #game-voice-chat-button:hover:not(:disabled) { transform: scale(1.05); }
+  #game-voice-chat-button:active:not(:disabled) { transform: scale(0.96); }
+  #game-voice-chat-button:focus-visible {
+    outline: 2px solid #72d6ff; outline-offset: 2px;
+  }
+  #game-voice-chat-button:disabled { cursor: wait; opacity: 0.48; }
+  #game-voice-chat-button[data-error="true"] { opacity: 0.72; }
+  #game-voice-chat-button img {
+    display: block; width: 44px; height: 44px; pointer-events: none;
+  }
+  #game-voice-chat-copy {
+    min-width: 0; display: grid; gap: 2px;
+    font: 12px/1.25 "Segoe UI", "PingFang SC", sans-serif;
+  }
+  #game-voice-chat-label { color: rgba(255,255,255,0.94); font-weight: 600; }
+  #game-voice-chat-status { color: rgba(255,255,255,0.68); }
+  #game-voice-chat-button[aria-pressed="true"] + #game-voice-chat-copy #game-voice-chat-status {
+    color: #8fe3ff;
+  }
+  #top-voice-control-slot {
+    display: flex; align-items: center; justify-content: center;
+    width: 44px; height: 44px;
+  }
+  #top-voice-control-slot[hidden] { display: none; }
+  #top-voice-control-slot #game-voice-chat-control {
+    margin: 0; padding: 0; gap: 0; border-bottom: 0;
+  }
+  #top-voice-control-slot #game-voice-chat-copy { display: none; }
+  #game-audio-controls {
+    display: grid; gap: 6px;
+  }
+  #game-audio-controls .game-audio-control-row {
+    display: grid; grid-template-columns: auto 128px 34px; gap: 6px 8px; align-items: center;
+  }
+  #game-audio-controls .game-audio-channel-toggle {
+    min-width: 44px; padding: 2px 4px; border: 0; border-radius: 4px;
+    background: transparent; cursor: pointer; text-align: left;
+    font: 12px/1.3 "Segoe UI", "PingFang SC", sans-serif;
+    color: rgba(255,255,255,0.84);
+  }
+  #game-audio-controls .game-audio-channel-toggle:hover {
+    background: rgba(255,255,255,0.12);
+  }
+  #game-audio-controls .game-audio-channel-toggle:focus-visible {
+    outline: 2px solid #72d6ff; outline-offset: 1px;
+  }
+  #game-audio-controls .game-audio-channel-toggle[aria-pressed="true"] {
+    color: rgba(255,255,255,0.52); background: rgba(0,0,0,0.22);
+    text-decoration: line-through;
+  }
+  #game-audio-controls input[type="range"] {
+    width: 128px;
+    accent-color: #72d6ff;
+    cursor: pointer;
+  }
+  #game-audio-controls output {
+    font: 11px/1.3 "Segoe UI", "PingFang SC", sans-serif;
+    color: rgba(255,255,255,0.68);
+    text-align: right;
+  }
+  #voice-controls {
+    margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.18);
+    display: none; grid-template-columns: auto 1fr auto; gap: 6px; align-items: center;
+  }
+  #voice-controls[data-debug-visible="true"] {
+    display: grid;
+  }
+  #voice-controls button, #voice-controls input {
+    border: 1px solid rgba(255,255,255,0.25); border-radius: 5px;
+    background: rgba(255,255,255,0.10); color: rgba(255,255,255,0.92);
+    font: 12px/1.3 "Segoe UI", "PingFang SC", sans-serif;
+  }
+  #voice-controls button { cursor: pointer; padding: 4px 8px; }
+  #voice-controls button.listening {
+    background: rgba(255,80,96,0.78); border-color: rgba(255,180,190,0.9);
+  }
+  #voice-controls input { min-width: 210px; padding: 4px 7px; }
+  #voice-status {
+    grid-column: 1 / -1; opacity: 0.75; font-size: 12px;
+  }
+  #mood-debug-panel {
+    display: none;
+    gap: 7px;
+    min-width: 260px;
+    position: relative;
+    z-index: 45;
+    pointer-events: auto;
+  }
+  #mood-debug-panel[data-debug-visible="true"] {
+    display: grid;
+  }
+  .mood-debug-title {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    font: 600 12px/1.3 "Segoe UI", "PingFang SC", sans-serif;
+    color: rgba(255,255,255,0.92);
+  }
+  .mood-debug-actions {
+    display: flex; align-items: center; gap: 5px;
+  }
+  #mood-debug-panel[data-collapsed="true"] .mood-debug-body {
+    display: none;
+  }
+  .mood-debug-body {
+    display: grid; gap: 7px;
+  }
+  .mood-debug-row {
+    display: flex; flex-wrap: wrap; gap: 5px;
+  }
+  #mood-debug-panel button {
+    border: 1px solid rgba(255,255,255,0.25); border-radius: 5px;
+    background: rgba(255,255,255,0.10); color: rgba(255,255,255,0.92);
+    font: 12px/1.3 "Segoe UI", "PingFang SC", sans-serif;
+    cursor: pointer; padding: 4px 7px;
+    pointer-events: auto;
+  }
+  #mood-debug-panel button[data-active="true"] {
+    background: rgba(255,255,255,0.28);
+    border-color: rgba(255,255,255,0.56);
+  }
+  #mood-debug-readout {
+    margin: 0; padding: 6px 7px; border-radius: 5px;
+    background: rgba(0,0,0,0.30); color: rgba(255,255,255,0.86);
+    font: 11px/1.35 Consolas, "Cascadia Mono", monospace;
+    white-space: pre-wrap;
+  }
+  #game-top-controls {
+    position: fixed; right: 12px; top: 12px; z-index: 120;
+    display: flex; align-items: center; gap: 8px;
+    font: 13px/1.3 "Segoe UI", "PingFang SC", sans-serif;
+  }
+  #game-top-controls[hidden] { display: none; }
+  #soccer-settings-button,
+  #exit-to-start-button {
+    min-height: 36px;
+    padding: 7px 12px;
+    border: 1px solid rgba(255,255,255,0.26);
+    border-radius: 6px;
+    background: rgba(0,0,0,0.52);
+    color: rgba(255,255,255,0.92);
+    font: 13px/1.3 "Segoe UI", "PingFang SC", sans-serif;
+    cursor: pointer;
+  }
+  #soccer-settings-button:hover,
+  #exit-to-start-button:hover {
+    background: rgba(40,40,40,0.72);
+    border-color: rgba(255,255,255,0.42);
+  }
+  #soccer-settings-button[aria-expanded="true"] {
+    background: rgba(92,145,116,0.68);
+    border-color: rgba(190,236,207,0.58);
+  }
+  #soccer-settings-button:focus-visible,
+  #exit-to-start-button:focus-visible {
+    outline: 2px solid #a8e5bd; outline-offset: 2px;
+  }
+  #soccer-settings-button:active,
+  #exit-to-start-button:active,
+  .settings-checkbox-row:active {
+    transform: translateY(1px);
+  }
+  #exit-to-start-button:disabled,
+  #soccer-start-button:disabled {
+    opacity: 0.55;
+    cursor: wait;
+  }
+  #exit-to-start-button[hidden] { display: none; }
+  #exit-prompt-overlay {
+    position: fixed; inset: 0; z-index: 130;
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+    background: rgba(8, 10, 14, 0.42);
+    pointer-events: auto;
+  }
+  #exit-prompt-overlay[hidden] { display: none; }
+  #exit-prompt-dialog {
+    width: min(420px, calc(100vw - 48px));
+    padding: 18px;
+    border: 1px solid rgba(255,255,255,0.22);
+    border-radius: 8px;
+    background: rgba(18, 22, 28, 0.94);
+    color: rgba(255,255,255,0.94);
+    box-shadow: 0 18px 50px rgba(0,0,0,0.34);
+    font: 14px/1.55 "Segoe UI", "PingFang SC", sans-serif;
+  }
+  #exit-prompt-line {
+    min-height: 44px;
+    margin: 0 0 14px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  #exit-prompt-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+  .exit-prompt-button {
+    min-height: 40px;
+    padding: 8px 12px;
+    border: 1px solid rgba(255,255,255,0.26);
+    border-radius: 6px;
+    background: rgba(255,255,255,0.10);
+    color: rgba(255,255,255,0.94);
+    font: 14px/1.25 "Segoe UI", "PingFang SC", sans-serif;
+    cursor: pointer;
+  }
+  .exit-prompt-button:hover {
+    background: rgba(255,255,255,0.17);
+    border-color: rgba(255,255,255,0.44);
+  }
+  .exit-prompt-button:active {
+    transform: translateY(1px);
+    background: rgba(255,255,255,0.12);
+  }
+  .exit-prompt-button.primary {
+    border-color: rgba(143,211,255,0.72);
+    background: rgba(80, 150, 205, 0.34);
+    box-shadow: 0 0 0 1px rgba(143,211,255,0.18);
+  }
+  .exit-prompt-button.primary:hover {
+    background: rgba(88, 162, 220, 0.46);
+    border-color: rgba(170,226,255,0.9);
+  }
+  .exit-prompt-button.secondary-muted {
+    position: relative;
+    color: rgba(255,255,255,0.78);
+  }
+  .exit-prompt-button.secondary-muted::after {
+    content: "";
+    position: absolute; inset: 0;
+    border-radius: inherit;
+    background: rgba(0,0,0,0.20);
+    pointer-events: none;
+  }
+  #exit-prompt-dismiss-row {
+    margin-top: 12px;
+    display: grid;
+    gap: 6px;
+  }
+  #exit-prompt-never-row {
+    display: inline-flex; align-items: center; gap: 7px;
+    color: rgba(255,255,255,0.86);
+  }
+  #exit-prompt-never-row[hidden],
+  #exit-prompt-never-note[hidden] { display: none; }
+  #exit-prompt-never-again {
+    width: 16px; height: 16px; margin: 0;
+    accent-color: #8fd3ff;
+  }
+  #exit-prompt-never-note {
+    margin: 0;
+    color: rgba(255,255,255,0.66);
+    font-size: 12px;
+    line-height: 1.45;
+  }
+  #loading-overlay {
+    position: fixed; inset: 0; z-index: 100;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(10, 12, 16, 0.88);
+    color: rgba(255,255,255,0.92);
+    font: 14px/1.5 "Segoe UI", "PingFang SC", sans-serif;
+    transition: opacity 0.35s ease;
+  }
+  #loading-overlay.hidden {
+    opacity: 0; pointer-events: none;
+  }
+  #loading-panel {
+    display: flex; flex-direction: column; align-items: center; gap: 14px;
+    padding: 14px 18px; border: 1px solid rgba(255,255,255,0.18);
+    background: rgba(255,255,255,0.08);
+    border-radius: 8px;
+    box-shadow: 0 14px 40px rgba(0,0,0,0.28);
+    min-width: 280px;
+    max-width: calc(100vw - 32px);
+  }
+  #loading-row {
+    display: flex; align-items: center; justify-content: center; gap: 12px;
+  }
+  #loading-spinner {
+    width: 24px; height: 24px; border-radius: 50%;
+    border: 3px solid rgba(255,255,255,0.28);
+    border-top-color: rgba(255,255,255,0.95);
+    animation: loading-spin 0.8s linear infinite;
+    flex: 0 0 auto;
+  }
+  #loading-spinner[hidden],
+  #loading-actions[hidden] { display: none; }
+  /* min-width 防止 spinner 隐藏前后整行宽度抖动；text-align: center 让短文案
+     （"模型加载完成"等 4-6 字状态串）在 180px 槽位内视觉居中——之前缺这条所以
+     文字落在槽位左侧、偏离 panel 中心约 50px。 */
+  #loading-text { min-width: 180px; text-align: center; }
+  #start-tutorial {
+    max-width: 360px;
+    padding: 10px 12px;
+    border-radius: 6px;
+    background: rgba(0,0,0,0.24);
+    border: 1px solid rgba(255,255,255,0.14);
+    color: rgba(255,255,255,0.84);
+    text-align: left;
+    font: 12px/1.45 "Segoe UI", "PingFang SC", sans-serif;
+  }
+  .start-tutorial-title {
+    margin-bottom: 5px;
+    color: rgba(255,255,255,0.95);
+    font-weight: 600;
+  }
+  #start-tutorial ul {
+    margin: 0;
+    padding-left: 18px;
+  }
+  #start-tutorial li + li {
+    margin-top: 3px;
+  }
+  #soccer-start-button {
+    min-width: 112px;
+    padding: 8px 18px;
+    border: 1px solid rgba(255,255,255,0.32);
+    border-radius: 6px;
+    background: rgba(255,255,255,0.14);
+    color: rgba(255,255,255,0.95);
+    font: 14px/1.3 "Segoe UI", "PingFang SC", sans-serif;
+    cursor: pointer;
+  }
+  #soccer-start-button:hover {
+    background: rgba(255,255,255,0.22);
+    border-color: rgba(255,255,255,0.50);
+  }
+  #loading-actions {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
+  #game-memory-option {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: rgba(255,255,255,0.88);
+    font: 13px/1.35 "Segoe UI", "PingFang SC", sans-serif;
+    cursor: pointer;
+  }
+  #game-memory-option input {
+    width: 15px;
+    height: 15px;
+    cursor: pointer;
+  }
+  #game-memory-hint {
+    max-width: 320px;
+    color: rgba(255,255,255,0.62);
+    text-align: left;
+    font: 11px/1.35 "Segoe UI", "PingFang SC", sans-serif;
+  }
+  @keyframes settings-panel-enter {
+    from { opacity: 0; transform: translateY(-5px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #controls { animation: none; }
+  }
+  @keyframes loading-spin { to { transform: rotate(360deg); } }

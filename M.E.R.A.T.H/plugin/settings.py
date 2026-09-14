@@ -1,0 +1,1008 @@
+
+import math
+import os
+import warnings
+from pathlib import Path
+from urllib.parse import urlparse
+
+from utils.config_manager import get_plugins_directory
+
+
+def _get_bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.lower() in ("true", "1", "yes", "on")
+
+
+def _get_int_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _get_float_env(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _validate_http_url(value: str, *, name: str, allow_empty: bool = False) -> str:
+    value = value.strip()
+    if allow_empty and not value:
+        return value
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"{name} must be a valid http(s) URL")
+    if parsed.username or parsed.password:
+        raise ValueError(f"{name} must not include credentials")
+    return value
+
+
+def _validate_market_origin(origin: str) -> str:
+    origin = origin.strip()
+    parsed = urlparse(origin)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"Invalid NEKO_MARKET_ORIGINS entry: {origin!r}")
+    if parsed.username or parsed.password:
+        raise ValueError(f"NEKO_MARKET_ORIGINS entry must not include credentials: {origin!r}")
+    if parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment:
+        raise ValueError(f"NEKO_MARKET_ORIGINS entries must be origins only: {origin!r}")
+    hostname = (parsed.hostname or "").lower()
+    http_allowed_hosts = {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "market.project-neko.cn",
+        "marketplace.project-neko.cn",
+    }
+    if parsed.scheme == "http" and hostname not in http_allowed_hosts:
+        raise ValueError(
+            "NEKO_MARKET_ORIGINS only allows http for localhost development "
+            "and official Market hosts; "
+            f"use https for trusted remote origins: {origin!r}"
+        )
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+# ========== 路径配置 ==========
+
+def get_builtin_plugin_config_root() -> Path:
+    """获取内置插件根目录（仓库内 ``plugin/plugins``）。"""
+    return (Path(__file__).parent / "plugins").resolve()
+
+
+PLUGIN_EXEC_STATE_ROOT_COLLISION = "PLUGIN_EXEC_STATE_ROOT_COLLISION"
+
+
+class PluginExecStateRootCollisionError(ValueError):
+    """Raised when executable packages and persistent state share one root."""
+
+    code = PLUGIN_EXEC_STATE_ROOT_COLLISION
+
+    def __init__(self, *, exec_root: Path, state_root: Path) -> None:
+        self.exec_root = exec_root
+        self.state_root = state_root
+        super().__init__(
+            f"{self.code}: plugin execution root {exec_root} must not equal "
+            f"plugin state root {state_root}"
+        )
+
+
+def get_plugin_state_root() -> Path:
+    """Return the SDK-owned persistent plugin state root.
+
+    This path intentionally retains the historical ``<N.E.K.O user root>/plugins``
+    layout. Package install, upgrade, rollback and uninstall code must never use
+    it as an executable-package replacement target.
+    """
+
+    return Path(get_plugins_directory()).resolve()
+
+
+def get_user_plugin_exec_root() -> Path:
+    """Return the writable root for user-installed plugin code.
+
+    An explicit legacy ``PLUGIN_CONFIG_ROOT`` override is still honoured as the
+    execution root. Without one, code is isolated under
+    ``.neko-plugin-installations/plugins`` while persistent state remains under
+    :func:`get_plugin_state_root`.
+    """
+
+    custom_path = os.getenv("PLUGIN_CONFIG_ROOT")
+    if custom_path:
+        return Path(custom_path).expanduser().resolve()
+    return (
+        get_plugin_state_root().parent
+        / ".neko-plugin-installations"
+        / "plugins"
+    ).resolve()
+
+
+def get_user_plugin_config_root() -> Path:
+    """Compatibility alias for the user plugin execution root.
+
+    New code should use :func:`get_user_plugin_exec_root`. The old helper name
+    is retained while callers migrate away from treating package code as
+    configuration/state.
+    """
+
+    return get_user_plugin_exec_root()
+
+
+def ensure_plugin_exec_state_roots_separated(
+    *,
+    exec_root: Path | None = None,
+    state_root: Path | None = None,
+) -> None:
+    """Fail closed before a package write can target persistent state."""
+
+    resolved_exec = (exec_root or get_user_plugin_exec_root()).resolve(strict=False)
+    resolved_state = (state_root or get_plugin_state_root()).resolve(strict=False)
+    if (
+        resolved_exec == resolved_state
+        or resolved_exec.is_relative_to(resolved_state)
+        or resolved_state.is_relative_to(resolved_exec)
+    ):
+        raise PluginExecStateRootCollisionError(
+            exec_root=resolved_exec,
+            state_root=resolved_state,
+        )
+
+
+def get_plugin_config_root() -> Path:
+    """Deprecated compatibility helper for the legacy single-root API.
+
+    Returns the legacy built-in plugin root for callers that still expect a
+    single ``Path``. New code should use ``PLUGIN_CONFIG_ROOTS`` when it needs
+    to search all plugin roots, or ``USER_PLUGIN_CONFIG_ROOT`` when it
+    specifically needs the writable user plugin directory.
+    """
+    warnings.warn(
+        "plugin.settings.get_plugin_config_root() is deprecated; use "
+        "PLUGIN_CONFIG_ROOTS or USER_PLUGIN_CONFIG_ROOT instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return BUILTIN_PLUGIN_CONFIG_ROOT
+
+
+def get_plugin_config_roots() -> tuple[Path, ...]:
+    """Return executable plugin roots in effective-source priority order."""
+    roots: list[Path] = []
+    for root in (get_user_plugin_exec_root(), get_builtin_plugin_config_root()):
+        if root not in roots:
+            roots.append(root)
+    return tuple(roots)
+
+
+def get_user_package_profiles_root() -> Path:
+    """获取用户插件包 profile 根目录。
+
+    - Env: ``PACKAGE_PROFILES_ROOT``
+    - 显式设置旧 ``PLUGIN_CONFIG_ROOT`` 时，兼容其同级的
+      ``.neko-package-profiles``。
+    - 其他情况默认：``<N.E.K.O user root>/.neko-package-profiles``。
+    """
+    custom_path = os.getenv("PACKAGE_PROFILES_ROOT")
+    if custom_path:
+        return Path(custom_path).expanduser().resolve()
+    legacy_plugin_root = os.getenv("PLUGIN_CONFIG_ROOT")
+    if legacy_plugin_root:
+        return (
+            Path(legacy_plugin_root).expanduser().resolve().parent
+            / ".neko-package-profiles"
+        ).resolve()
+    return (get_plugin_state_root().parent / ".neko-package-profiles").resolve()
+
+
+def get_user_plugin_packages_root() -> Path:
+    """获取用户插件包（``.neko-plugin`` / ``.neko-bundle``）落地目录。
+
+    - Env: ``PLUGIN_PACKAGES_ROOT``
+    - 显式设置旧 ``PLUGIN_CONFIG_ROOT`` 时，兼容其同级的
+      ``.neko-plugin-packages``。
+    - 其他情况默认：``<N.E.K.O user root>/.neko-plugin-packages``。
+    """
+    custom_path = os.getenv("PLUGIN_PACKAGES_ROOT")
+    if custom_path:
+        return Path(custom_path).expanduser().resolve()
+    legacy_plugin_root = os.getenv("PLUGIN_CONFIG_ROOT")
+    if legacy_plugin_root:
+        return (
+            Path(legacy_plugin_root).expanduser().resolve().parent
+            / ".neko-plugin-packages"
+        ).resolve()
+    return (get_plugin_state_root().parent / ".neko-plugin-packages").resolve()
+
+
+BUILTIN_PLUGIN_CONFIG_ROOT = get_builtin_plugin_config_root()
+PLUGIN_STATE_ROOT = get_plugin_state_root()
+USER_PLUGIN_EXEC_ROOT = get_user_plugin_exec_root()
+# Compatibility alias: historically this was both code and state. It now
+# deliberately names the execution root only.
+USER_PLUGIN_CONFIG_ROOT = USER_PLUGIN_EXEC_ROOT
+USER_PACKAGE_PROFILES_ROOT = get_user_package_profiles_root()
+USER_PLUGIN_PACKAGES_ROOT = get_user_plugin_packages_root()
+# Deprecated compatibility alias for older single-root callers.
+PLUGIN_CONFIG_ROOT = BUILTIN_PLUGIN_CONFIG_ROOT
+PLUGIN_CONFIG_ROOTS = get_plugin_config_roots()
+warnings.warn(
+    "plugin.settings.PLUGIN_CONFIG_ROOT is deprecated; use PLUGIN_CONFIG_ROOTS "
+    "or USER_PLUGIN_CONFIG_ROOT instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
+
+# ========== 队列容量配置 ==========
+
+# 事件队列最大容量
+# Env: NEKO_EVENT_QUEUE_MAX, default=1000
+# 用于主进程内部的事件派发队列（如插件生命周期事件等）。
+EVENT_QUEUE_MAX = _get_int_env("NEKO_EVENT_QUEUE_MAX", 1000)
+
+# 生命周期事件队列最大容量
+# Env: NEKO_LIFECYCLE_QUEUE_MAX, default=1000
+# 控制 "lifecycle" 相关事件（插件启动/停止等）的排队上限。
+LIFECYCLE_QUEUE_MAX = _get_int_env("NEKO_LIFECYCLE_QUEUE_MAX", 1000)
+
+# 消息总队列最大容量
+# Env: NEKO_MESSAGE_QUEUE_MAX, default=1000
+# 用于插件向主进程推送消息的总队列上限，避免无限堆积。
+MESSAGE_QUEUE_MAX = _get_int_env("NEKO_MESSAGE_QUEUE_MAX", 1000)
+EXPORT_INLINE_BINARY_MAX_BYTES = _get_int_env("NEKO_EXPORT_INLINE_BINARY_MAX_BYTES", 256 * 1024)
+
+RUN_TOKEN_SECRET = os.getenv("NEKO_RUN_TOKEN_SECRET", "dev-insecure-run-token-secret")
+RUN_TOKEN_TTL_SECONDS = _get_int_env("NEKO_RUN_TOKEN_TTL_SECONDS", 3600)
+# 单次 Run 的最大执行时间（秒），超时后自动标记为 timeout
+# Env: NEKO_RUN_EXECUTION_TIMEOUT, default=30.0 (5分钟)
+RUN_EXECUTION_TIMEOUT = _get_float_env("NEKO_RUN_EXECUTION_TIMEOUT", 300.0)
+# InMemoryRunStore 保留的已终止 Run 最大数量，超出后淘汰最旧的
+# Env: NEKO_RUN_STORE_MAX_COMPLETED, default=500
+RUN_STORE_MAX_COMPLETED = _get_int_env("NEKO_RUN_STORE_MAX_COMPLETED", 500)
+
+BLOB_STORE_DIR = os.getenv("NEKO_BLOB_STORE_DIR", str((Path(__file__).parent / "store" / "blobs").resolve()))
+BLOB_UPLOAD_MAX_BYTES = _get_int_env("NEKO_BLOB_UPLOAD_MAX_BYTES", 200 * 1024 * 1024)
+BLOB_UPLOAD_SESSION_TTL_SECONDS = _get_float_env("NEKO_BLOB_UPLOAD_SESSION_TTL_SECONDS", 3600.0)
+
+
+# ========== 超时 & 轮询配置（秒） ==========
+
+# 单次插件入口执行的最大允许时间
+# Env: NEKO_PLUGIN_EXECUTION_TIMEOUT, default=30.0
+# 用于 SDK 层对长时间运行入口的保护（例如 HTTP 触发的入口）。
+PLUGIN_EXECUTION_TIMEOUT = _get_float_env("NEKO_PLUGIN_EXECUTION_TIMEOUT", 30.0)
+
+# Host -> 插件进程 trigger 的等待超时
+# Env: NEKO_PLUGIN_TRIGGER_TIMEOUT, default=10.0
+# 影响 ``PluginProcessHost.trigger`` 的等待时间，超时后会返回错误。
+PLUGIN_TRIGGER_TIMEOUT = _get_float_env("NEKO_PLUGIN_TRIGGER_TIMEOUT", 10.0)
+
+# Host -> plugin process startup ready wait timeout.
+# Env: NEKO_PLUGIN_STARTUP_TIMEOUT, default=10.0
+PLUGIN_STARTUP_TIMEOUT = _get_float_env("NEKO_PLUGIN_STARTUP_TIMEOUT", 10.0)
+
+# Keep the next-launch auto-start preference in sync with explicit user
+# start/stop actions from the plugin manager. Internal lifecycle operations do
+# not persist user intent and therefore do not change auto-start.
+# Env: NEKO_PLUGIN_SYNC_AUTO_START_ON_TOGGLE, default=True
+PLUGIN_SYNC_AUTO_START_ON_TOGGLE = _get_bool_env(
+    "NEKO_PLUGIN_SYNC_AUTO_START_ON_TOGGLE",
+    True,
+)
+
+# 单个插件优雅关闭的超时时间
+# Env: NEKO_PLUGIN_SHUTDOWN_TIMEOUT, default=1.5
+# 用于 ``host.shutdown``，超过后会进入更激进的终止流程。
+PLUGIN_SHUTDOWN_TIMEOUT = _get_float_env("NEKO_PLUGIN_SHUTDOWN_TIMEOUT", 1.5)
+
+# 所有插件整体关闭的最大等待时间（用于 server shutdown）
+# Env: PLUGIN_SHUTDOWN_TOTAL_TIMEOUT 或 NEKO_PLUGIN_SHUTDOWN_TOTAL_TIMEOUT, default=3
+_shutdown_total_timeout_str = os.getenv("PLUGIN_SHUTDOWN_TOTAL_TIMEOUT", os.getenv("NEKO_PLUGIN_SHUTDOWN_TOTAL_TIMEOUT", "3"))
+try:
+    PLUGIN_SHUTDOWN_TOTAL_TIMEOUT = int(_shutdown_total_timeout_str)
+except ValueError:
+    PLUGIN_SHUTDOWN_TOTAL_TIMEOUT = 3
+
+# 队列操作超时（queue.get）
+# Env: NEKO_QUEUE_GET_TIMEOUT, default=1.0
+# 所有通过 ``Queue.get(timeout=...)`` 的阻塞等待都建议使用该配置。
+QUEUE_GET_TIMEOUT = _get_float_env("NEKO_QUEUE_GET_TIMEOUT", 1.0)
+
+# 插件 SDK 同步轮询响应间隔
+# Env: NEKO_BUS_SDK_POLL_INTERVAL_SECONDS, default=0.002
+# bus.*.get 等接口轮询共享 ``response_map`` 的时间间隔；
+# - 调小：降低延迟抖动、提升吞吐，但会增加 CPU 占用；
+# - 调大：降低 CPU，占用，但响应延迟波动增大。
+BUS_SDK_POLL_INTERVAL_SECONDS = _get_float_env("NEKO_BUS_SDK_POLL_INTERVAL_SECONDS", 0.002)
+
+# 状态消费器在 shutdown 时的最大等待时间
+# Env: NEKO_STATUS_CONSUMER_SHUTDOWN_TIMEOUT, default=0.5
+STATUS_CONSUMER_SHUTDOWN_TIMEOUT = _get_float_env("NEKO_STATUS_CONSUMER_SHUTDOWN_TIMEOUT", 0.5)
+
+# 插件进程优雅关闭的最长等待时间
+# Env: NEKO_PROCESS_SHUTDOWN_TIMEOUT, default=1.0
+PROCESS_SHUTDOWN_TIMEOUT = _get_float_env("NEKO_PROCESS_SHUTDOWN_TIMEOUT", 1.0)
+
+# 插件进程在被强制终止（terminate）后的 join 超时时间
+# Env: NEKO_PROCESS_TERMINATE_TIMEOUT, default=0.5
+PROCESS_TERMINATE_TIMEOUT = _get_float_env("NEKO_PROCESS_TERMINATE_TIMEOUT", 0.5)
+
+
+# ========== 插件市场配置 ==========
+
+# Auth 平台 URL。桌面端 OAuth 登录只对接 Auth/Hydra，不再走 Market。
+# Env: NEKO_AUTH_URL, default="https://auth.project-neko.cn"
+NEKO_AUTH_URL = _validate_http_url(
+    os.getenv("NEKO_AUTH_URL", "https://auth.project-neko.cn"),
+    name="NEKO_AUTH_URL",
+    allow_empty=True,
+)
+
+# 桌面端 OAuth public client id。必须是无 client secret 的 public client。
+# Env: NEKO_AUTH_CLIENT_ID, default="neko-desktop"
+# NOTE: This is the Plugin Market client. The community / Servers Desktop PKCE
+# flow uses a different client id (env NEKO_SERVERS_DESKTOP_CLIENT_ID) and owns
+# it in main_routers/community_oauth.py — never reuse neko-desktop there.
+NEKO_AUTH_CLIENT_ID = os.getenv("NEKO_AUTH_CLIENT_ID", "neko-desktop").strip() or "neko-desktop"
+
+# 插件市场 API URL。配置后插件管理面板会显示"插件市场"入口。
+# Env: NEKO_MARKET_API_URL, default="https://market.project-neko.cn"
+# 兼容旧 Env: NEKO_MARKET_URL；本地开发可用环境变量覆盖。
+MARKET_API_URL = _validate_http_url(
+    os.getenv(
+        "NEKO_MARKET_API_URL",
+        os.getenv("NEKO_MARKET_URL", "https://market.project-neko.cn"),
+    ),
+    name="NEKO_MARKET_API_URL",
+    allow_empty=True,
+)
+
+# Backward-compatible alias for older imports. Do not use this as an auth URL.
+MARKET_URL = MARKET_API_URL
+
+# 插件市场 Web URL。插件管理器打开详情页时使用这个地址，而 API 请求仍走
+# MARKET_API_URL + /api/v1。本地开发默认前端 Vite 端口 5173；生产未显式配置时
+# 默认与 MARKET_API_URL 同源。
+# Env: NEKO_MARKET_WEB_URL
+_market_web_url_env = os.getenv("NEKO_MARKET_WEB_URL")
+if _market_web_url_env is not None:
+    MARKET_WEB_URL = _validate_http_url(
+        _market_web_url_env,
+        name="NEKO_MARKET_WEB_URL",
+        allow_empty=True,
+    )
+elif MARKET_API_URL.rstrip("/") in {"http://localhost:8000", "http://127.0.0.1:8000"}:
+    MARKET_WEB_URL = "http://localhost:5173"
+else:
+    MARKET_WEB_URL = MARKET_API_URL
+
+# 允许的 Market CORS 来源（逗号分隔）。
+# 用于允许 Market 前端跨域调用本地 /market/* 端点。
+# Env: NEKO_MARKET_ORIGINS, default=Project N.E.K.O Market public origins
+# 此配置会影响 CORS 安全策略，仅应配置受信任的 Market 前端域名。
+_default_market_origins = (
+    "https://market.project-neko.cn,"
+    "https://marketplace.project-neko.cn"
+)
+MARKET_ORIGINS = [
+    _validate_market_origin(o)
+    for o in os.getenv("NEKO_MARKET_ORIGINS", _default_market_origins).split(",")
+    if o.strip()
+]
+
+
+# ========== 线程池配置 ==========
+
+# 通信资源管理器的线程池最大工作线程数
+# - 每个插件的通信管理器需要至少 3 个线程：
+#   1. _consume_results - 持续读取结果队列
+#   2. _consume_messages - 持续读取消息队列
+#   3. _send_command_and_wait - 发送命令到插件
+# - 公式：``max(8, (CPU核心数 or 1) + 4)``，确保多插件场景下有足够的线程
+COMMUNICATION_THREAD_POOL_MAX_WORKERS = max(32, (os.cpu_count() or 1) + 8)
+
+
+# ========== 消息拉取默认上限 ==========
+
+# 获取消息时的默认 ``max_count``
+# Env: NEKO_MESSAGE_QUEUE_DEFAULT_MAX_COUNT, default=100
+# bus.messages.get / events.get / lifecycle.get 等接口在未显式指定 max_count 时使用该值。
+MESSAGE_QUEUE_DEFAULT_MAX_COUNT = _get_int_env("NEKO_MESSAGE_QUEUE_DEFAULT_MAX_COUNT", 100)
+
+# 获取状态消息时的默认 ``max_count``
+# Env: NEKO_STATUS_MESSAGE_DEFAULT_MAX_COUNT, default=100
+STATUS_MESSAGE_DEFAULT_MAX_COUNT = _get_int_env("NEKO_STATUS_MESSAGE_DEFAULT_MAX_COUNT", 100)
+
+
+# ========== SDK 元数据属性 ==========
+
+# 插件元数据属性名（用于标记插件类）
+NEKO_PLUGIN_META_ATTR = "__neko_plugin_meta__"
+
+# 插件标签（用于标记插件类）
+NEKO_PLUGIN_TAG = "__neko_plugin__"
+
+
+# ========== 其他运行时配置 ==========
+
+# 状态消费任务的休眠间隔（秒）
+# 固定值，主要影响 CPU/延迟折中；通常不需要修改。
+STATUS_CONSUMER_SLEEP_INTERVAL = 0.1
+
+# 消息消费任务的休眠间隔（秒）
+MESSAGE_CONSUMER_SLEEP_INTERVAL = 0.1
+
+# 结果消费任务的休眠间隔（秒）
+RESULT_CONSUMER_SLEEP_INTERVAL = 0.1
+
+# 是否打印插件消息转发日志（[MESSAGE FORWARD]）
+# Env: NEKO_PLUGIN_LOG_MESSAGE_FORWARD, default=True
+PLUGIN_LOG_MESSAGE_FORWARD = _get_bool_env("NEKO_PLUGIN_LOG_MESSAGE_FORWARD", True)
+
+# 是否打印插件同步调用告警（"Sync call '...' may block ..."）
+# Env: NEKO_PLUGIN_LOG_SYNC_CALL_WARNINGS, default=True
+PLUGIN_LOG_SYNC_CALL_WARNINGS = _get_bool_env("NEKO_PLUGIN_LOG_SYNC_CALL_WARNINGS", True)
+
+# 是否在订阅变更时打印 bus 订阅信息
+# Env: NEKO_PLUGIN_LOG_BUS_SUBSCRIPTIONS, default=True
+PLUGIN_LOG_BUS_SUBSCRIPTIONS = _get_bool_env("NEKO_PLUGIN_LOG_BUS_SUBSCRIPTIONS", True)
+
+# 是否打印订阅请求日志
+# Env: NEKO_PLUGIN_LOG_BUS_SUBSCRIBE_REQUESTS, default=True
+PLUGIN_LOG_BUS_SUBSCRIBE_REQUESTS = _get_bool_env("NEKO_PLUGIN_LOG_BUS_SUBSCRIBE_REQUESTS", True)
+
+# 是否在 SDK 调用超时时打印告警
+# Env: NEKO_PLUGIN_LOG_BUS_SDK_TIMEOUT_WARNINGS, default=True
+PLUGIN_LOG_BUS_SDK_TIMEOUT_WARNINGS = _get_bool_env("NEKO_PLUGIN_LOG_BUS_SDK_TIMEOUT_WARNINGS", True)
+
+# 是否在 ctx.status.update 时打印日志
+# Env: NEKO_PLUGIN_LOG_CTX_STATUS_UPDATE, default=True
+PLUGIN_LOG_CTX_STATUS_UPDATE = _get_bool_env("NEKO_PLUGIN_LOG_CTX_STATUS_UPDATE", True)
+
+# 是否在 ctx.push_message 时打印日志
+# Env: NEKO_PLUGIN_LOG_CTX_MESSAGE_PUSH, default=True
+PLUGIN_LOG_CTX_MESSAGE_PUSH = _get_bool_env("NEKO_PLUGIN_LOG_CTX_MESSAGE_PUSH", True)
+
+# 是否打印服务端调试日志（更啰嗦）
+# Env: NEKO_PLUGIN_LOG_SERVER_DEBUG, default=False
+PLUGIN_LOG_SERVER_DEBUG = _get_bool_env("NEKO_PLUGIN_LOG_SERVER_DEBUG", False)
+
+# ========== Message Schema 校验 ==========
+
+# 是否对 message bus 的 payload 做严格字段/类型校验。
+# Env: NEKO_MESSAGE_SCHEMA_STRICT, default=True
+MESSAGE_SCHEMA_STRICT = _get_bool_env("NEKO_MESSAGE_SCHEMA_STRICT", True)
+
+# 是否允许插件通过 payload 标记 unsafe 来跳过严格校验（用于高性能场景）。
+# Env: NEKO_MESSAGE_SCHEMA_ALLOW_UNSAFE, default=True
+MESSAGE_SCHEMA_ALLOW_UNSAFE = _get_bool_env("NEKO_MESSAGE_SCHEMA_ALLOW_UNSAFE", True)
+
+# 是否对出现未知字段（schema 外字段）打印 warning。
+# Env: NEKO_MESSAGE_SCHEMA_WARN_UNKNOWN_FIELDS, default=True
+MESSAGE_SCHEMA_WARN_UNKNOWN_FIELDS = _get_bool_env("NEKO_MESSAGE_SCHEMA_WARN_UNKNOWN_FIELDS", True)
+
+# 是否启用 ZeroMQ IPC 管道（插件进程 <-> 主进程）
+# Env: NEKO_PLUGIN_ZMQ_IPC_ENABLED, default=True
+PLUGIN_ZMQ_IPC_ENABLED = _get_bool_env("NEKO_PLUGIN_ZMQ_IPC_ENABLED", True)
+
+# ZeroMQ IPC 端点地址
+# Env: NEKO_PLUGIN_ZMQ_IPC_ENDPOINT, default="tcp://127.0.0.1:38765"
+PLUGIN_ZMQ_IPC_ENDPOINT = os.getenv("NEKO_PLUGIN_ZMQ_IPC_ENDPOINT", "tcp://127.0.0.1:38765")
+
+# [MESSAGE FORWARD] 日志去重窗口（秒）
+# Env: NEKO_PLUGIN_MESSAGE_FORWARD_LOG_DEDUP_WINDOW_SECONDS, default=1.0
+PLUGIN_MESSAGE_FORWARD_LOG_DEDUP_WINDOW_SECONDS = _get_float_env(
+    "NEKO_PLUGIN_MESSAGE_FORWARD_LOG_DEDUP_WINDOW_SECONDS", 1.0
+)
+
+# bus 变更日志去重窗口（秒）
+# Env: NEKO_PLUGIN_BUS_CHANGE_LOG_DEDUP_WINDOW_SECONDS, default=1.0
+PLUGIN_BUS_CHANGE_LOG_DEDUP_WINDOW_SECONDS = _get_float_env(
+    "NEKO_PLUGIN_BUS_CHANGE_LOG_DEDUP_WINDOW_SECONDS", 1.0
+)
+
+# ========== Message Plane (High-Frequency Bus) ==========
+
+# Message plane ZeroMQ RPC 端点（用于高频 bus 的请求/响应，例如 get/reload/filter 等）
+# 使用 TCP 回环（127.0.0.1），在某些系统上比 IPC 更快
+# Env: NEKO_MESSAGE_PLANE_ZMQ_RPC_ENDPOINT, default="tcp://127.0.0.1:38865"
+MESSAGE_PLANE_ZMQ_RPC_ENDPOINT = os.getenv(
+    "NEKO_MESSAGE_PLANE_ZMQ_RPC_ENDPOINT",
+    os.getenv("NEKO_MESSAGE_PLANE_RPC", "tcp://127.0.0.1:38865"),
+)
+
+
+def resolve_message_plane_rpc_endpoint() -> str:
+    """The RPC endpoint the plane is actually on, read at call time.
+
+    The constant above is frozen when this module is imported, which happens
+    before ``build_message_plane_runner()`` runs. When the configured port is
+    occupied that runner moves the plane to a fallback and publishes the new
+    address by writing ``NEKO_MESSAGE_PLANE_ZMQ_RPC_ENDPOINT`` back into the
+    environment -- so anything holding the constant is pointed at the occupied
+    port and every bus read fails.
+
+    Affects the host process as much as a forked plugin child: the constant was
+    already computed there too. A spawned child re-imports this module and picks
+    the new value up on its own, which is why the symptom is POSIX-shaped.
+
+    This mirrors what ``ProactiveBridge._run`` already does for the PUB
+    endpoint (``os.getenv(..., str(MESSAGE_PLANE_ZMQ_PUB_ENDPOINT))``); the RPC
+    consumers were the ones left reading the frozen value.
+    """
+    return os.getenv(
+        "NEKO_MESSAGE_PLANE_ZMQ_RPC_ENDPOINT",
+        os.getenv("NEKO_MESSAGE_PLANE_RPC", str(MESSAGE_PLANE_ZMQ_RPC_ENDPOINT)),
+    )
+
+# Message plane ZeroMQ PUB 端点（用于高频 bus 的订阅/推送，例如 watcher、export progress 等）
+# 使用 TCP 回环（127.0.0.1），在某些系统上比 IPC 更快
+# Env: NEKO_MESSAGE_PLANE_ZMQ_PUB_ENDPOINT, default="tcp://127.0.0.1:38866"
+MESSAGE_PLANE_ZMQ_PUB_ENDPOINT = os.getenv(
+    "NEKO_MESSAGE_PLANE_ZMQ_PUB_ENDPOINT",
+    os.getenv("NEKO_MESSAGE_PLANE_PUB", "tcp://127.0.0.1:38866"),
+)
+
+# Message plane 始终以内嵌线程方式运行。
+# 保留端点配置，但不再支持 external 独立子进程模式。
+
+MESSAGE_PLANE_VALIDATE_MODE = os.getenv("NEKO_MESSAGE_PLANE_VALIDATE_MODE", "strict").lower()
+if MESSAGE_PLANE_VALIDATE_MODE not in ("off", "warn", "strict"):
+    MESSAGE_PLANE_VALIDATE_MODE = "strict"
+
+MESSAGE_PLANE_TOPIC_MAX = _get_int_env("NEKO_MESSAGE_PLANE_TOPIC_MAX", 2000)
+MESSAGE_PLANE_TOPIC_NAME_MAX_LEN = _get_int_env("NEKO_MESSAGE_PLANE_TOPIC_NAME_MAX_LEN", 128)
+# message_plane 单条 payload 上限（字节）。插件侧 push_message 和 host 侧 ingest
+# 共用这一个常量来判定 payload_too_large，因此两边不会漂移。
+# 512 KiB 而不是 256 KiB：inline 图片以 base64 走线，是原始字节的 4/3，所以这里
+# 定的是"编码后"的预算。要让文档承诺的 256 KiB inline 图片真的能过，编码后就得
+# 放得下 341 KiB，再留出 text part 和信封的余量——512 KiB 换算回原始字节约
+# 384 KiB。（同期停掉了 legacy binary_data 的裸字节副本；在那之前一张图要走
+# 约 2.34x，256 KiB 的上限实际只兜得住约 110 KiB 的图。）
+# Env: NEKO_MESSAGE_PLANE_PAYLOAD_MAX_BYTES, default=512*1024
+MESSAGE_PLANE_PAYLOAD_MAX_BYTES = _get_int_env("NEKO_MESSAGE_PLANE_PAYLOAD_MAX_BYTES", 512 * 1024)
+MESSAGE_PLANE_STORE_MAXLEN = _get_int_env("NEKO_MESSAGE_PLANE_STORE_MAXLEN", 20000)
+
+# ``frames`` store 的独立容量。绝不能复用 MESSAGE_PLANE_STORE_MAXLEN：那是
+# per-topic deque 长度，20000 张 ~150 KB 的截图约 2 GB 常驻，且等于把用户约 8
+# 小时的屏幕历史留在 agent_server 进程里。frames 的契约是"provider 最近收到的
+# 那几张"，不是日志，所以这里只留个位数。
+# 下界 2：单张会让"刚拉过一次就被下一帧顶掉"变成常态，pull 方连一次重试都做不了。
+# 上界 8：再大只是延长屏幕内容的驻留时间，对 pull 方没有额外价值。
+# Env: NEKO_MESSAGE_PLANE_FRAMES_STORE_MAXLEN, default=4
+MESSAGE_PLANE_FRAMES_STORE_MAXLEN = max(
+    2, min(8, _get_int_env("NEKO_MESSAGE_PLANE_FRAMES_STORE_MAXLEN", 4))
+)
+
+# 一帧允许排进 plane bridge 发送队列的前提：队列当前深度低于这个水位。
+# bridge 的队列（maxsize=4096）是 events / lifecycle / runs 共用的，一条普通记录
+# 几百字节，一帧却是几百 KB。不设水位的话，bridge 一旦卡住，队列会先被帧填满，
+# 挤掉那些真正需要送达的小记录，内存也跟着涨到几百 MB。帧本来就是有损的：
+# bridge 落后时直接丢，比排队几分钟后送一张过期的图更符合契约。
+# Env: NEKO_MESSAGE_PLANE_FRAMES_BRIDGE_MAX_PENDING, default=64
+MESSAGE_PLANE_FRAMES_BRIDGE_MAX_PENDING = max(
+    1, _get_int_env("NEKO_MESSAGE_PLANE_FRAMES_BRIDGE_MAX_PENDING", 64)
+)
+MESSAGE_PLANE_GET_RECENT_MAX_LIMIT = _get_int_env("NEKO_MESSAGE_PLANE_GET_RECENT_MAX_LIMIT", 1000)
+
+MESSAGE_PLANE_ZMQ_INGEST_ENDPOINT = os.getenv(
+    "NEKO_MESSAGE_PLANE_ZMQ_INGEST_ENDPOINT",
+    os.getenv("NEKO_MESSAGE_PLANE_INGEST", "tcp://127.0.0.1:38867"),
+)
+MESSAGE_PLANE_INGEST_RCVHWM = _get_int_env("NEKO_MESSAGE_PLANE_INGEST_RCVHWM", 10000)
+
+MESSAGE_PLANE_INGEST_STATS_LOG_ENABLED = _get_bool_env("NEKO_MESSAGE_PLANE_INGEST_STATS_LOG_ENABLED", True)
+MESSAGE_PLANE_INGEST_STATS_LOG_INFO = _get_bool_env("NEKO_MESSAGE_PLANE_INGEST_STATS_LOG_INFO", True)
+MESSAGE_PLANE_INGEST_STATS_LOG_VERBOSE = _get_bool_env("NEKO_MESSAGE_PLANE_INGEST_STATS_LOG_VERBOSE", False)
+MESSAGE_PLANE_INGEST_STATS_INTERVAL_SECONDS = _get_float_env("NEKO_MESSAGE_PLANE_INGEST_STATS_INTERVAL_SECONDS", 1.0)
+MESSAGE_PLANE_INGEST_BACKPRESSURE_SLEEP_SECONDS = _get_float_env("NEKO_MESSAGE_PLANE_INGEST_BACKPRESSURE_SLEEP_SECONDS", 0.0)
+
+# Plugin -> message_plane ingest PUSH send timeout (ms). Prevents plugin thread from blocking indefinitely
+# under heavy backpressure.
+# Env: NEKO_MESSAGE_PLANE_INGEST_SNDTIMEO_MS, default=1000
+MESSAGE_PLANE_INGEST_SNDTIMEO_MS = _get_int_env("NEKO_MESSAGE_PLANE_INGEST_SNDTIMEO_MS", 1000)
+
+MESSAGE_PLANE_PUB_ENABLED = _get_bool_env("NEKO_MESSAGE_PLANE_PUB_ENABLED", True)
+MESSAGE_PLANE_VALIDATE_PAYLOAD_BYTES = _get_bool_env("NEKO_MESSAGE_PLANE_VALIDATE_PAYLOAD_BYTES", True)
+
+# 同样在加载处钳到 >=1。Python 的 queue.Queue(maxsize=0) 是**无界**，不是
+# "一条都不收"：配成 0 或负数时批处理器会拿到一个无界队列，而
+# enqueue 的拒收水位又被 `self._max_queue > 0` 这个条件跳过，两道闸同时
+# 失效，积压只受内存限制。
+MESSAGE_PLANE_PUSH_BATCHER_MAX_QUEUE = max(
+    1, _get_int_env("NEKO_MESSAGE_PLANE_PUSH_BATCHER_MAX_QUEUE", 100000)
+)
+MESSAGE_PLANE_PUSH_BATCHER_REJECT_RATIO = _get_float_env("NEKO_MESSAGE_PLANE_PUSH_BATCHER_REJECT_RATIO", 0.9)
+MESSAGE_PLANE_PUSH_BATCHER_ENQUEUE_TIMEOUT_SECONDS = _get_float_env(
+    "NEKO_MESSAGE_PLANE_PUSH_BATCHER_ENQUEUE_TIMEOUT_SECONDS",
+    0.01,
+)
+
+MESSAGE_PLANE_BRIDGE_ENABLED = _get_bool_env("NEKO_MESSAGE_PLANE_BRIDGE_ENABLED", True)
+
+# PUSH 批量大小（条数）
+# Env: NEKO_PLUGIN_ZMQ_MESSAGE_PUSH_BATCH_SIZE, default=256
+# 在加载处就钳到 >=1，而不是让每个使用方各自 max(1, ...)：批量器构造时钳过
+# （_AuthenticatedMessageBatcher.__init__），宿主侧的收批校验却是拿原始值比。
+# 配成 0 或负数时两边就不一致——子进程发出合法的 1 条批量，宿主判
+# len(items) > 0 成立、整批拒收，主动搭话静默停摆。归一化放在这里，两侧
+# 读到的就是同一个数。
+PLUGIN_ZMQ_MESSAGE_PUSH_BATCH_SIZE = max(
+    1, _get_int_env("NEKO_PLUGIN_ZMQ_MESSAGE_PUSH_BATCH_SIZE", 256)
+)
+
+# 控制上行单帧的字节上限。
+#
+# 它曾经直接借用消息上行那个数，而那个数是 payload_max * batch_max ——批量
+# 乘数对**从不批量**的控制通道在定义上就不适用，借过来等于给每一帧
+# 128 MiB，配上控制 socket 5000 条的 HWM 根本不是个界。
+#
+# 但也不能猜低：控制面下游没有自己的体积契约，砍低了会**静默**删掉真实的
+# 工具结果——libzmq 在接收引擎里丢帧并断开对端，recv() 不报错，宿主连字节
+# 都看不到。所以这个数必须罩住一次合法 CH_RES 的三个部分：
+#
+#   图片   _MAX_TOOL_IMAGES * _MAX_TOOL_IMAGE_B64_BYTES = 2 * 2 MiB
+#   输出   工具的 output 没有上限，用 message plane 单条 payload 的界
+#          （MESSAGE_PLANE_PAYLOAD_MAX_BYTES，默认 512 KiB）当额度——它是本
+#          仓已有的"一条结构化载荷能有多大"的尺子，不是新造的数
+#   信封   msgpack 结构 + token + vision_prompt，与消息上行同源的 64 KiB
+#
+# 只按图片推导过一版，实测发现两张满尺寸图 + 仅 60 KB 文本输出就超限：
+# output 和图片走同一帧，漏掉它等于把"每帧 128 MiB"换成"合法结果被静默扯
+# 掉"，比原来更糟。测试现在按**这个组合**量，而不是只量图片。
+#
+# 关系由测试钉住（见 test_zmq_transport_security），所以哪天工具图上限或
+# plane 载荷上限动了、这里没跟着动，会红而不是静默丢结果。
+# Env: NEKO_PLUGIN_ZMQ_CONTROL_UPLINK_MAX_BYTES
+PLUGIN_ZMQ_CONTROL_UPLINK_MAX_BYTES = _get_int_env(
+    "NEKO_PLUGIN_ZMQ_CONTROL_UPLINK_MAX_BYTES",
+    4 * 1024 * 1024 + MESSAGE_PLANE_PAYLOAD_MAX_BYTES + 64 * 1024,
+)
+
+# PUSH 刷新间隔（毫秒），小批量高频发送或大批量低频发送的折中参数
+# Env: NEKO_PLUGIN_ZMQ_MESSAGE_PUSH_FLUSH_INTERVAL_MS, default=5
+PLUGIN_ZMQ_MESSAGE_PUSH_FLUSH_INTERVAL_MS = _get_int_env("NEKO_PLUGIN_ZMQ_MESSAGE_PUSH_FLUSH_INTERVAL_MS", 5)
+
+# 同步调用在 handler 中的全局策略（"warn" / "reject"）
+# Env: NEKO_PLUGIN_SYNC_CALL_POLICY, default="warn"
+_sync_policy = os.getenv("NEKO_PLUGIN_SYNC_CALL_POLICY", "warn").lower()
+if _sync_policy not in ("warn", "reject"):
+    _sync_policy = "warn"
+SYNC_CALL_IN_HANDLER_POLICY = _sync_policy
+
+# ========== 插件 Logger 文件配置 ==========
+
+# 插件文件日志默认配置（使用 loguru 创建的进程内 file handler）
+# 默认日志级别（字符串格式，loguru 使用）
+PLUGIN_LOG_LEVEL = "INFO"
+
+# 单个日志文件最大大小（字节），默认 5MB
+PLUGIN_LOG_MAX_BYTES = 5 * 1024 * 1024
+
+# 轮转备份文件数量，默认 10 个
+PLUGIN_LOG_BACKUP_COUNT = 10
+
+# 最多保留的日志文件总数（包括当前和备份），默认 20 个
+PLUGIN_LOG_MAX_FILES = 20
+
+
+# ========== 插件状态持久化配置 ==========
+
+# 插件状态持久化后端（统一管理 freeze 和自动保存）
+# - "off": 禁用持久化（默认）
+# - "memory": 保存到内存（主进程重启后丢失）
+# - "file": 保存到文件（持久化）
+# Env: NEKO_PLUGIN_STATE_BACKEND, default="off"
+PLUGIN_STATE_BACKEND_DEFAULT = os.getenv("NEKO_PLUGIN_STATE_BACKEND", "off").strip().lower()
+if PLUGIN_STATE_BACKEND_DEFAULT not in ("off", "memory", "file"):
+    PLUGIN_STATE_BACKEND_DEFAULT = "off"
+
+# ========== Store 配置 ==========
+# Store 默认后端：sqlite/memory/off (默认 off，需要开发者显式启用)
+PLUGIN_STORE_BACKEND_DEFAULT = os.getenv("NEKO_PLUGIN_STORE_BACKEND", "off")
+
+
+# ========== 插件加载行为配置 ==========
+
+# 是否启用插件依赖检查
+# Env: PLUGIN_ENABLE_DEPENDENCY_CHECK, default=False
+# - False：跳过依赖检查，允许加载不满足依赖关系的插件（仅建议开发/调试环境使用）；
+# - True：严格检查依赖，不满足则拒绝加载。
+PLUGIN_ENABLE_DEPENDENCY_CHECK = os.getenv("PLUGIN_ENABLE_DEPENDENCY_CHECK", "false").lower() in ("true", "1", "yes")
+
+# 是否启用插件 ID 冲突检查
+# Env: PLUGIN_ENABLE_ID_CONFLICT_CHECK, default=False
+# - False：跳过 ID 冲突检查，允许多个插件声明相同 ID（可能导致不可预期行为，仅建议调试使用）；
+# - True：启用严格 ID 冲突检测和重命名逻辑。
+PLUGIN_ENABLE_ID_CONFLICT_CHECK = os.getenv("PLUGIN_ENABLE_ID_CONFLICT_CHECK", "false").lower() in ("true", "1", "yes")
+
+
+# ========== 主进程 loguru 配置 ==========
+
+# 主进程 loguru 日志等级（仅影响主进程；插件子进程会各自配置 loguru）
+# Env: NEKO_LOGURU_LEVEL, default="INFO"
+NEKO_LOGURU_LEVEL = os.getenv("NEKO_LOGURU_LEVEL", "INFO")
+
+
+# ========== 配置验证 ==========
+
+def validate_config() -> None:
+    """
+    验证配置的有效性
+    
+    硬校验：模块导入时即验证并抛出异常，避免启动后才发现配置非法。
+    如未来改为运行时可配置，请同步调整校验时机和策略。
+    
+    Raises:
+        ValueError: 如果配置无效
+    """
+    if EVENT_QUEUE_MAX <= 0:
+        raise ValueError("EVENT_QUEUE_MAX must be positive")
+    if EVENT_QUEUE_MAX > 1000000:
+        raise ValueError("EVENT_QUEUE_MAX is unreasonably large (max: 1000000)")
+
+    if LIFECYCLE_QUEUE_MAX <= 0:
+        raise ValueError("LIFECYCLE_QUEUE_MAX must be positive")
+    if LIFECYCLE_QUEUE_MAX > 1000000:
+        raise ValueError("LIFECYCLE_QUEUE_MAX is unreasonably large (max: 1000000)")
+    
+    if MESSAGE_QUEUE_MAX <= 0:
+        raise ValueError("MESSAGE_QUEUE_MAX must be positive")
+    if MESSAGE_QUEUE_MAX > 1000000:
+        raise ValueError("MESSAGE_QUEUE_MAX is unreasonably large (max: 1000000)")
+    
+    if PLUGIN_EXECUTION_TIMEOUT <= 0:
+        raise ValueError("PLUGIN_EXECUTION_TIMEOUT must be positive")
+    if PLUGIN_EXECUTION_TIMEOUT > 3600:
+        raise ValueError("PLUGIN_EXECUTION_TIMEOUT is unreasonably large (max: 3600s)")
+    
+    if PLUGIN_TRIGGER_TIMEOUT <= 0:
+        raise ValueError("PLUGIN_TRIGGER_TIMEOUT must be positive")
+    if PLUGIN_TRIGGER_TIMEOUT > 3600:
+        raise ValueError("PLUGIN_TRIGGER_TIMEOUT is unreasonably large (max: 3600s)")
+
+    if not math.isfinite(PLUGIN_STARTUP_TIMEOUT) or PLUGIN_STARTUP_TIMEOUT <= 0:
+        raise ValueError("PLUGIN_STARTUP_TIMEOUT must be positive")
+    if PLUGIN_STARTUP_TIMEOUT > 300:
+        raise ValueError("PLUGIN_STARTUP_TIMEOUT is unreasonably large (max: 300s)")
+
+    if PLUGIN_SHUTDOWN_TIMEOUT <= 0:
+        raise ValueError("PLUGIN_SHUTDOWN_TIMEOUT must be positive")
+    if PLUGIN_SHUTDOWN_TIMEOUT > 300:
+        raise ValueError("PLUGIN_SHUTDOWN_TIMEOUT is unreasonably large (max: 300s)")
+    
+    if PLUGIN_SHUTDOWN_TOTAL_TIMEOUT <= 0:
+        raise ValueError("PLUGIN_SHUTDOWN_TOTAL_TIMEOUT must be positive")
+    if PLUGIN_SHUTDOWN_TOTAL_TIMEOUT > 300:
+        raise ValueError("PLUGIN_SHUTDOWN_TOTAL_TIMEOUT is unreasonably large (max: 300s)")
+
+    if QUEUE_GET_TIMEOUT <= 0:
+        raise ValueError("QUEUE_GET_TIMEOUT must be positive")
+    if QUEUE_GET_TIMEOUT > 60:
+        raise ValueError("QUEUE_GET_TIMEOUT is unreasonably large (max: 60s)")
+
+    if BUS_SDK_POLL_INTERVAL_SECONDS < 0:
+        raise ValueError("BUS_SDK_POLL_INTERVAL_SECONDS must be >= 0")
+    if BUS_SDK_POLL_INTERVAL_SECONDS > 1:
+        raise ValueError("BUS_SDK_POLL_INTERVAL_SECONDS is unreasonably large (max: 1s)")
+
+    if PLUGIN_MESSAGE_FORWARD_LOG_DEDUP_WINDOW_SECONDS < 0:
+        raise ValueError("PLUGIN_MESSAGE_FORWARD_LOG_DEDUP_WINDOW_SECONDS must be >= 0")
+    if PLUGIN_MESSAGE_FORWARD_LOG_DEDUP_WINDOW_SECONDS > 3600:
+        raise ValueError("PLUGIN_MESSAGE_FORWARD_LOG_DEDUP_WINDOW_SECONDS is unreasonably large (max: 3600s)")
+
+    if PLUGIN_BUS_CHANGE_LOG_DEDUP_WINDOW_SECONDS < 0:
+        raise ValueError("PLUGIN_BUS_CHANGE_LOG_DEDUP_WINDOW_SECONDS must be >= 0")
+    if PLUGIN_BUS_CHANGE_LOG_DEDUP_WINDOW_SECONDS > 3600:
+        raise ValueError("PLUGIN_BUS_CHANGE_LOG_DEDUP_WINDOW_SECONDS is unreasonably large (max: 3600s)")
+
+    if STATUS_CONSUMER_SHUTDOWN_TIMEOUT <= 0:
+        raise ValueError("STATUS_CONSUMER_SHUTDOWN_TIMEOUT must be positive")
+    if STATUS_CONSUMER_SHUTDOWN_TIMEOUT > 300:
+        raise ValueError("STATUS_CONSUMER_SHUTDOWN_TIMEOUT is unreasonably large (max: 300s)")
+
+    if PROCESS_SHUTDOWN_TIMEOUT <= 0:
+        raise ValueError("PROCESS_SHUTDOWN_TIMEOUT must be positive")
+    if PROCESS_SHUTDOWN_TIMEOUT > 300:
+        raise ValueError("PROCESS_SHUTDOWN_TIMEOUT is unreasonably large (max: 300s)")
+
+    if PROCESS_TERMINATE_TIMEOUT <= 0:
+        raise ValueError("PROCESS_TERMINATE_TIMEOUT must be positive")
+    if PROCESS_TERMINATE_TIMEOUT > 60:
+        raise ValueError("PROCESS_TERMINATE_TIMEOUT is unreasonably large (max: 60s)")
+
+    _validate_http_url(NEKO_AUTH_URL, name="NEKO_AUTH_URL", allow_empty=True)
+    _validate_http_url(MARKET_API_URL, name="MARKET_API_URL", allow_empty=True)
+    _validate_http_url(MARKET_WEB_URL, name="MARKET_WEB_URL", allow_empty=True)
+    for origin in MARKET_ORIGINS:
+        _validate_market_origin(origin)
+    
+    if COMMUNICATION_THREAD_POOL_MAX_WORKERS <= 0:
+        raise ValueError("COMMUNICATION_THREAD_POOL_MAX_WORKERS must be positive")
+    if COMMUNICATION_THREAD_POOL_MAX_WORKERS > 100:
+        raise ValueError("COMMUNICATION_THREAD_POOL_MAX_WORKERS is unreasonably large (max: 100)")
+    
+    if MESSAGE_QUEUE_DEFAULT_MAX_COUNT <= 0:
+        raise ValueError("MESSAGE_QUEUE_DEFAULT_MAX_COUNT must be positive")
+    if MESSAGE_QUEUE_DEFAULT_MAX_COUNT > 10000:
+        raise ValueError("MESSAGE_QUEUE_DEFAULT_MAX_COUNT is unreasonably large (max: 10000)")
+    
+    if STATUS_MESSAGE_DEFAULT_MAX_COUNT <= 0:
+        raise ValueError("STATUS_MESSAGE_DEFAULT_MAX_COUNT must be positive")
+    if STATUS_MESSAGE_DEFAULT_MAX_COUNT > 10000:
+        raise ValueError("STATUS_MESSAGE_DEFAULT_MAX_COUNT is unreasonably large (max: 10000)")
+
+
+# 在模块加载时验证配置
+validate_config()
+
+
+# ========== 导出 ==========
+
+__all__ = [
+    # 路径配置
+    "BUILTIN_PLUGIN_CONFIG_ROOT",
+    "USER_PLUGIN_CONFIG_ROOT",
+    "USER_PACKAGE_PROFILES_ROOT",
+    "USER_PLUGIN_PACKAGES_ROOT",
+    "PLUGIN_CONFIG_ROOT",
+    "PLUGIN_CONFIG_ROOTS",
+    "NEKO_AUTH_URL",
+    "NEKO_AUTH_CLIENT_ID",
+    "MARKET_API_URL",
+    "MARKET_URL",
+    "MARKET_WEB_URL",
+    "MARKET_ORIGINS",
+    "get_builtin_plugin_config_root",
+    "get_plugin_config_root",
+    "get_plugin_config_roots",
+    "get_user_plugin_config_root",
+    "get_user_package_profiles_root",
+    "get_user_plugin_packages_root",
+    
+    # 队列配置
+    "EVENT_QUEUE_MAX",
+    "LIFECYCLE_QUEUE_MAX",
+    "MESSAGE_QUEUE_MAX",
+    
+    # 超时配置
+    "PLUGIN_EXECUTION_TIMEOUT",
+    "PLUGIN_TRIGGER_TIMEOUT",
+    "PLUGIN_STARTUP_TIMEOUT",
+    "PLUGIN_SHUTDOWN_TIMEOUT",
+    "PLUGIN_SHUTDOWN_TOTAL_TIMEOUT",
+    "QUEUE_GET_TIMEOUT",
+    "BUS_SDK_POLL_INTERVAL_SECONDS",
+    "STATUS_CONSUMER_SHUTDOWN_TIMEOUT",
+    "PROCESS_SHUTDOWN_TIMEOUT",
+    "PROCESS_TERMINATE_TIMEOUT",
+    
+    # 线程池配置
+    "COMMUNICATION_THREAD_POOL_MAX_WORKERS",
+    
+    # 消息队列配置
+    "MESSAGE_QUEUE_DEFAULT_MAX_COUNT",
+    "STATUS_MESSAGE_DEFAULT_MAX_COUNT",
+    
+    # SDK 元数据属性
+    "NEKO_PLUGIN_META_ATTR",
+    "NEKO_PLUGIN_TAG",
+    
+    # Message schema 校验
+    "MESSAGE_SCHEMA_STRICT",
+    "MESSAGE_SCHEMA_ALLOW_UNSAFE",
+    "MESSAGE_SCHEMA_WARN_UNKNOWN_FIELDS",
+    
+    # 其他配置
+    "STATUS_CONSUMER_SLEEP_INTERVAL",
+    "MESSAGE_CONSUMER_SLEEP_INTERVAL",
+    "RESULT_CONSUMER_SLEEP_INTERVAL",
+    "PLUGIN_LOG_MESSAGE_FORWARD",
+    "PLUGIN_LOG_SYNC_CALL_WARNINGS",
+    "PLUGIN_LOG_BUS_SUBSCRIPTIONS",
+    "PLUGIN_LOG_BUS_SUBSCRIBE_REQUESTS",
+    "PLUGIN_LOG_BUS_SDK_TIMEOUT_WARNINGS",
+    "PLUGIN_LOG_CTX_STATUS_UPDATE",
+    "PLUGIN_LOG_CTX_MESSAGE_PUSH",
+    "PLUGIN_LOG_SERVER_DEBUG",
+    "PLUGIN_MESSAGE_FORWARD_LOG_DEDUP_WINDOW_SECONDS",
+    "PLUGIN_BUS_CHANGE_LOG_DEDUP_WINDOW_SECONDS",
+    "SYNC_CALL_IN_HANDLER_POLICY",
+
+    # Message plane
+    "MESSAGE_PLANE_ZMQ_RPC_ENDPOINT",
+    "MESSAGE_PLANE_ZMQ_PUB_ENDPOINT",
+    "MESSAGE_PLANE_ZMQ_INGEST_ENDPOINT",
+    "MESSAGE_PLANE_VALIDATE_MODE",
+    
+    # 插件Logger配置
+    "PLUGIN_LOG_LEVEL",
+    "PLUGIN_LOG_MAX_BYTES",
+    "PLUGIN_LOG_BACKUP_COUNT",
+    "PLUGIN_LOG_MAX_FILES",
+    
+    # 状态持久化配置
+    "PLUGIN_STATE_BACKEND_DEFAULT",
+    
+    # Run 配置
+    "RUN_EXECUTION_TIMEOUT",
+    "RUN_STORE_MAX_COMPLETED",
+    
+    # 验证函数
+    "validate_config",
+]
+
+
+# Admin API: explicit allowlist for externally exposable system settings.
+PUBLIC_SYSTEM_CONFIG_KEYS = (
+    "BUILTIN_PLUGIN_CONFIG_ROOT",
+    "USER_PLUGIN_CONFIG_ROOT",
+    "USER_PACKAGE_PROFILES_ROOT",
+    "USER_PLUGIN_PACKAGES_ROOT",
+    "PLUGIN_CONFIG_ROOT",
+    "PLUGIN_CONFIG_ROOTS",
+    "NEKO_AUTH_URL",
+    "NEKO_AUTH_CLIENT_ID",
+    "MARKET_API_URL",
+    "MARKET_URL",
+    "MARKET_WEB_URL",
+    "EVENT_QUEUE_MAX",
+    "LIFECYCLE_QUEUE_MAX",
+    "MESSAGE_QUEUE_MAX",
+    "PLUGIN_EXECUTION_TIMEOUT",
+    "PLUGIN_TRIGGER_TIMEOUT",
+    "PLUGIN_STARTUP_TIMEOUT",
+    "PLUGIN_SHUTDOWN_TIMEOUT",
+    "PLUGIN_SHUTDOWN_TOTAL_TIMEOUT",
+    "QUEUE_GET_TIMEOUT",
+    "BUS_SDK_POLL_INTERVAL_SECONDS",
+    "STATUS_CONSUMER_SHUTDOWN_TIMEOUT",
+    "PROCESS_SHUTDOWN_TIMEOUT",
+    "PROCESS_TERMINATE_TIMEOUT",
+    "COMMUNICATION_THREAD_POOL_MAX_WORKERS",
+    "MESSAGE_QUEUE_DEFAULT_MAX_COUNT",
+    "STATUS_MESSAGE_DEFAULT_MAX_COUNT",
+    "NEKO_PLUGIN_META_ATTR",
+    "NEKO_PLUGIN_TAG",
+    "MESSAGE_SCHEMA_STRICT",
+    "MESSAGE_SCHEMA_ALLOW_UNSAFE",
+    "MESSAGE_SCHEMA_WARN_UNKNOWN_FIELDS",
+    "STATUS_CONSUMER_SLEEP_INTERVAL",
+    "MESSAGE_CONSUMER_SLEEP_INTERVAL",
+    "RESULT_CONSUMER_SLEEP_INTERVAL",
+    "PLUGIN_LOG_MESSAGE_FORWARD",
+    "PLUGIN_LOG_SYNC_CALL_WARNINGS",
+    "PLUGIN_LOG_BUS_SUBSCRIPTIONS",
+    "PLUGIN_LOG_BUS_SUBSCRIBE_REQUESTS",
+    "PLUGIN_LOG_BUS_SDK_TIMEOUT_WARNINGS",
+    "PLUGIN_LOG_CTX_STATUS_UPDATE",
+    "PLUGIN_LOG_CTX_MESSAGE_PUSH",
+    "PLUGIN_LOG_SERVER_DEBUG",
+    "PLUGIN_MESSAGE_FORWARD_LOG_DEDUP_WINDOW_SECONDS",
+    "PLUGIN_BUS_CHANGE_LOG_DEDUP_WINDOW_SECONDS",
+    "SYNC_CALL_IN_HANDLER_POLICY",
+    "MESSAGE_PLANE_BACKEND",
+    "MESSAGE_PLANE_RUST_BIN",
+    "MESSAGE_PLANE_WORKERS",
+    "MESSAGE_PLANE_ZMQ_RPC_ENDPOINT",
+    "MESSAGE_PLANE_ZMQ_PUB_ENDPOINT",
+    "MESSAGE_PLANE_ZMQ_INGEST_ENDPOINT",
+    "MESSAGE_PLANE_VALIDATE_MODE",
+    "PLUGIN_LOG_LEVEL",
+    "PLUGIN_LOG_MAX_BYTES",
+    "PLUGIN_LOG_BACKUP_COUNT",
+    "PLUGIN_LOG_MAX_FILES",
+    "PLUGIN_STATE_BACKEND_DEFAULT",
+    "RUN_EXECUTION_TIMEOUT",
+    "RUN_STORE_MAX_COMPLETED",
+)

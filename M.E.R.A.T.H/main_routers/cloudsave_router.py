@@ -1,0 +1,756 @@
+# -*- coding: utf-8 -*-
+# Copyright 2025-2026 Project N.E.K.O. Team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+Cloudsave Router
+
+Provides cloudsave summary, single-character upload/download APIs,
+and safety checks around runtime reload.
+
+URL convention: routes declared WITHOUT trailing slash (no ``@router.get('/')``).
+See ``main_routers/characters_router.py`` docstring or
+``.agent/rules/neko-guide.md`` (§"API URL 末尾不带斜杠") for the rationale;
+enforced by ``scripts/check_api_trailing_slash.py``.
+"""
+
+import asyncio
+import logging
+from contextlib import suppress
+
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
+
+from .shared_state import ensure_steamworks, get_config_manager, get_initialize_character_data, get_role_state, get_session_manager
+from .characters_router import (
+    create_derived_task_claim_token,
+    notify_memory_server_reload,
+    release_memory_server_character,
+    send_reload_page_notice,
+)
+from .workshop_router import get_subscribed_workshop_items, get_workshop_item_details
+from utils.cloudsave_autocloud import (
+    STEAM_AUTO_CLOUD_SYNC_BACKEND,
+    build_steam_autocloud_status,
+)
+from utils.cloudsave_runtime import (
+    CloudsaveOperationError,
+    MaintenanceModeError,
+    ROOT_MODE_BOOTSTRAP_IMPORTING,
+    build_cloudsave_character_detail,
+    build_cloudsave_summary,
+    async_cloud_apply_fence,
+    export_cloudsave_character_unit,
+    finalize_cloudsave_character_import,
+    import_cloudsave_character_unit,
+    is_cloudsave_provider_available,
+    restore_cloudsave_operation_backup,
+    rollback_cloudsave_character_import_registry,
+)
+
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/cloudsave", tags=["cloudsave"])
+_character_download_apply_lock = asyncio.Lock()
+
+
+async def _await_thread_call_to_completion(func, *args, **kwargs):
+    """Return a worker result and whether cancellation arrived while it ran."""
+    operation = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+    try:
+        return await asyncio.shield(operation), False
+    except asyncio.CancelledError:
+        while not operation.done():
+            with suppress(asyncio.CancelledError):
+                await asyncio.wait({operation})
+        return operation.result(), True
+
+
+async def _await_coroutine_to_completion(coro):
+    """Finish an async transaction despite cancellation and report that cancellation."""
+    operation = asyncio.create_task(coro)
+    try:
+        return await asyncio.shield(operation), False
+    except asyncio.CancelledError:
+        while not operation.done():
+            with suppress(asyncio.CancelledError):
+                await asyncio.wait({operation})
+        return operation.result(), True
+
+
+CLOUDSAVE_ERROR_I18N_KEYS = {
+    "CLOUDSAVE_PROVIDER_UNAVAILABLE": "cloudsave.error.providerUnavailable",
+    "ACTIVE_SESSION_BLOCKED": "cloudsave.error.activeSessionBlocked",
+    "SESSION_TERMINATE_FAILED": "cloudsave.error.sessionTerminateFailed",
+    "MEMORY_SERVER_RELEASE_FAILED": "cloudsave.error.memoryServerReleaseFailed",
+    "LOCAL_CHARACTER_NOT_FOUND": "cloudsave.error.localCharacterNotFound",
+    "CLOUD_CHARACTER_NOT_FOUND": "cloudsave.error.cloudCharacterNotFound",
+    "CLOUDSAVE_CHARACTER_NOT_FOUND": "cloudsave.error.cloudCharacterNotFound",
+    "LOCAL_CHARACTER_EXISTS": "cloudsave.error.localCharacterExists",
+    "CLOUD_CHARACTER_EXISTS": "cloudsave.error.cloudCharacterExists",
+    "CLOUDSAVE_WRITE_FENCE_ACTIVE": "cloudsave.error.writeFenceActive",
+    "NAME_AUDIT_FAILED": "cloudsave.error.nameAuditFailed",
+    "CLOUDSAVE_UPLOAD_FAILED": "cloudsave.error.uploadFailed",
+    "CLOUDSAVE_DOWNLOAD_FAILED": "cloudsave.error.downloadFailed",
+    "LOCAL_RELOAD_FAILED_ROLLED_BACK": "cloudsave.error.localReloadFailedRolledBack",
+    "INVALID_JSON_BODY": "cloudsave.error.invalidJsonBody",
+}
+
+
+def _build_steam_autocloud_payload(config_manager) -> dict:
+    return build_steam_autocloud_status(
+        config_manager,
+        steamworks=ensure_steamworks(),
+    )
+
+
+def _default_workshop_status_payload(item_id: str, status: str = "") -> dict:
+    return {
+        "item_id": str(item_id or ""),
+        "status": str(status or ""),
+        "title": "",
+        "author_name": "",
+    }
+
+
+def _derive_workshop_status_payload(item_id: str, item_info: dict | None) -> dict:
+    item_info = item_info if isinstance(item_info, dict) else {}
+    state = item_info.get("state") if isinstance(item_info.get("state"), dict) else {}
+    installed = bool(state.get("installed"))
+    subscribed = bool(state.get("subscribed"))
+
+    if installed and subscribed:
+        status = "installed_and_subscribed"
+    elif installed:
+        status = "installed_but_unsubscribed"
+    elif subscribed:
+        status = "subscribed_not_installed"
+    else:
+        status = "available_needs_resubscribe"
+
+    return {
+        "item_id": str(item_id or ""),
+        "status": status,
+        "title": str(item_info.get("title") or ""),
+        "author_name": str(item_info.get("authorName") or ""),
+    }
+
+
+def _collect_workshop_item_ids(items: list[dict]) -> list[str]:
+    item_ids: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        for scope in ("local", "cloud"):
+            for source_prefix in (f"{scope}_asset", f"{scope}_origin"):
+                if str(item.get(f"{source_prefix}_source") or "") != "steam_workshop":
+                    continue
+                source_id = str(item.get(f"{source_prefix}_source_id") or "").strip()
+                if source_id:
+                    item_ids.add(source_id)
+    return sorted(item_ids)
+
+
+async def _fetch_workshop_status_payload(item_id: str) -> dict:
+    detail = await get_workshop_item_details(item_id)
+    if isinstance(detail, JSONResponse):
+        if detail.status_code == 404:
+            return _default_workshop_status_payload(item_id, "unavailable")
+        if detail.status_code == 503:
+            return _default_workshop_status_payload(item_id, "steam_unavailable")
+        return _default_workshop_status_payload(item_id, "unknown")
+
+    if isinstance(detail, dict) and detail.get("success"):
+        return _derive_workshop_status_payload(item_id, detail.get("item"))
+    return _default_workshop_status_payload(item_id, "unknown")
+
+
+async def _build_workshop_status_map(items: list[dict]) -> dict[str, dict]:
+    item_ids = _collect_workshop_item_ids(items)
+    if not item_ids:
+        return {}
+
+    status_map: dict[str, dict] = {}
+    subscribed_lookup: dict[str, dict] = {}
+
+    subscribed_items_result = await get_subscribed_workshop_items()
+    if isinstance(subscribed_items_result, JSONResponse):
+        if subscribed_items_result.status_code == 503:
+            return {
+                item_id: _default_workshop_status_payload(item_id, "steam_unavailable")
+                for item_id in item_ids
+            }
+    elif isinstance(subscribed_items_result, dict) and subscribed_items_result.get("success"):
+        for item_info in subscribed_items_result.get("items") or []:
+            if not isinstance(item_info, dict):
+                continue
+            published_file_id = str(item_info.get("publishedFileId") or "").strip()
+            if published_file_id:
+                subscribed_lookup[published_file_id] = item_info
+
+    missing_item_ids: list[str] = []
+    for item_id in item_ids:
+        if item_id in subscribed_lookup:
+            status_map[item_id] = _derive_workshop_status_payload(item_id, subscribed_lookup[item_id])
+        else:
+            missing_item_ids.append(item_id)
+
+    if missing_item_ids:
+        results = await asyncio.gather(
+            *(_fetch_workshop_status_payload(item_id) for item_id in missing_item_ids),
+            return_exceptions=True,
+        )
+        for item_id, result in zip(missing_item_ids, results, strict=True):
+            if isinstance(result, Exception):
+                status_map[item_id] = _default_workshop_status_payload(item_id, "unknown")
+            else:
+                status_map[item_id] = result
+    return status_map
+
+
+def _apply_workshop_status_to_item(item: dict, workshop_status_map: dict[str, dict]) -> None:
+    if not isinstance(item, dict):
+        return
+
+    for scope, source_prefix in (
+        ("local", "local_asset"),
+        ("cloud", "cloud_asset"),
+        ("local_origin", "local_origin"),
+        ("cloud_origin", "cloud_origin"),
+    ):
+        item[f"{scope}_workshop_status"] = ""
+        item[f"{scope}_workshop_title"] = ""
+        item[f"{scope}_workshop_author_name"] = ""
+
+        if str(item.get(f"{source_prefix}_source") or "") != "steam_workshop":
+            continue
+
+        source_id = str(item.get(f"{source_prefix}_source_id") or "").strip()
+        if not source_id:
+            item[f"{scope}_workshop_status"] = "unknown"
+            continue
+
+        payload = workshop_status_map.get(source_id) or _default_workshop_status_payload(source_id, "unknown")
+        item[f"{scope}_workshop_status"] = str(payload.get("status") or "")
+        item[f"{scope}_workshop_title"] = str(payload.get("title") or "")
+        item[f"{scope}_workshop_author_name"] = str(payload.get("author_name") or "")
+
+
+async def _enrich_cloudsave_payload_with_workshop_status(payload: dict | None) -> dict | None:
+    if not isinstance(payload, dict):
+        return payload
+
+    items: list[dict] = []
+    if isinstance(payload.get("items"), list):
+        items = [item for item in payload.get("items") or [] if isinstance(item, dict)]
+    elif isinstance(payload.get("item"), dict):
+        items = [payload["item"]]
+
+    if not items:
+        return payload
+
+    workshop_status_map = await _build_workshop_status_map(items)
+    for item in items:
+        _apply_workshop_status_to_item(item, workshop_status_map)
+    return payload
+
+
+def _cloudsave_error_response(
+    code: str,
+    message: str,
+    *,
+    status_code: int = 400,
+    character_name: str = "",
+    message_key: str = "",
+    message_params: dict | None = None,
+    extra: dict | None = None,
+):
+    payload = {
+        "success": False,
+        "error": code,
+        "code": code,
+        "message": message,
+        "message_key": message_key or CLOUDSAVE_ERROR_I18N_KEYS.get(code, ""),
+        "message_params": message_params or {},
+    }
+    if character_name:
+        payload["character_name"] = character_name
+    if extra:
+        payload.update(extra)
+    return JSONResponse(payload, status_code=status_code)
+
+
+def _active_session_block_reason(character_name: str) -> str:
+    session_manager = get_session_manager()
+    mgr = session_manager.get(character_name)
+    if mgr is None or not getattr(mgr, "is_active", False):
+        return ""
+    return "This character has an active session. Stop the session before downloading."
+
+
+async def _force_terminate_session(character_name: str) -> tuple[bool, str]:
+    session_manager = get_session_manager()
+    mgr = session_manager.get(character_name)
+    if mgr is None or not getattr(mgr, "is_active", False):
+        return True, ""
+
+    try:
+        await mgr.disconnected_by_server()
+        role_state = get_role_state()
+        rs = role_state.get(character_name)
+        if rs is not None:
+            rs.session_manager = None
+        return True, ""
+    except Exception as exc:
+        logger.warning("强制终止角色 %s 会话失败: %s", character_name, exc)
+        return False, str(exc)
+
+
+def _local_character_exists(config_manager, character_name: str) -> bool:
+    characters_payload = config_manager.load_characters()
+    return character_name in (characters_payload.get("猫娘") or {})
+
+
+def _operation_error_status_code(exc: CloudsaveOperationError, *, action: str) -> int:
+    if exc.code in {"LOCAL_CHARACTER_NOT_FOUND", "CLOUD_CHARACTER_NOT_FOUND"}:
+        return 404
+    if exc.code in {"LOCAL_CHARACTER_EXISTS", "CLOUD_CHARACTER_EXISTS", "CLOUDSAVE_WRITE_FENCE_ACTIVE"}:
+        return 409
+    if exc.code == "NAME_AUDIT_FAILED":
+        return 400
+    if action in {"upload", "download"}:
+        return 400
+    return 400
+
+
+def _maintenance_mode_error_response(exc: MaintenanceModeError, *, character_name: str = ""):
+    return _cloudsave_error_response(
+        getattr(exc, "code", "CLOUDSAVE_WRITE_FENCE_ACTIVE"),
+        str(exc),
+        status_code=409,
+        character_name=character_name,
+    )
+
+
+async def _reload_after_character_download(
+    character_name: str,
+    release_claim_token: str | None = None,
+) -> tuple[bool, str]:
+    initialize_character_data = get_initialize_character_data()
+    await initialize_character_data()
+    memory_server_reloaded = await notify_memory_server_reload(
+        reason=f"云存档下载角色: {character_name}",
+        resume_derived_task_names=(character_name,),
+        release_derived_task_claims=(
+            {character_name: (release_claim_token,)}
+            if release_claim_token
+            else None
+        ),
+    )
+    if not memory_server_reloaded:
+        return False, "memory_server reload failed"
+
+    session_manager = get_session_manager()
+    mgr = session_manager.get(character_name)
+    if mgr is not None and getattr(mgr, "websocket", None):
+        await send_reload_page_notice(mgr, "云存档角色已更新，页面即将刷新")
+    return True, ""
+
+
+@router.get("/summary")
+async def get_cloudsave_summary():
+    config_manager = get_config_manager()
+    summary = build_cloudsave_summary(config_manager)
+    summary["sync_backend"] = STEAM_AUTO_CLOUD_SYNC_BACKEND
+    summary["steam_autocloud"] = _build_steam_autocloud_payload(config_manager)
+    return await _enrich_cloudsave_payload_with_workshop_status(summary)
+
+
+@router.get("/steam-autocloud-config")
+async def get_steam_autocloud_config():
+    config_manager = get_config_manager()
+    return {
+        "success": True,
+        "sync_backend": STEAM_AUTO_CLOUD_SYNC_BACKEND,
+        "steam_autocloud": _build_steam_autocloud_payload(config_manager),
+    }
+
+
+@router.get("/character/{name}")
+async def get_cloudsave_character_detail(name: str):
+    config_manager = get_config_manager()
+    detail = build_cloudsave_character_detail(config_manager, name)
+    if detail is None:
+        return _cloudsave_error_response(
+            "CLOUDSAVE_CHARACTER_NOT_FOUND",
+            f"cloudsave character not found: {name}",
+            status_code=404,
+            character_name=name,
+        )
+    detail["sync_backend"] = STEAM_AUTO_CLOUD_SYNC_BACKEND
+    detail["steam_autocloud"] = _build_steam_autocloud_payload(config_manager)
+    return await _enrich_cloudsave_payload_with_workshop_status(detail)
+
+
+@router.post("/character/{name}/upload")
+async def post_cloudsave_character_upload(name: str, request: Request):
+    config_manager = get_config_manager()
+    if not is_cloudsave_provider_available(config_manager):
+        return _cloudsave_error_response(
+            "CLOUDSAVE_PROVIDER_UNAVAILABLE",
+            "Cloud save provider is currently unavailable.",
+            status_code=503,
+            character_name=name,
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        return _cloudsave_error_response(
+            "INVALID_JSON_BODY",
+            "Invalid JSON request body.",
+            status_code=400,
+            character_name=name,
+        )
+    overwrite_val = (body or {}).get("overwrite", False)
+    if not isinstance(overwrite_val, bool):
+        return _cloudsave_error_response(
+            "INVALID_PARAMETER",
+            "Invalid parameter: overwrite must be boolean.",
+            status_code=400,
+            character_name=name,
+            message_key="cloudsave.error.invalidBooleanParameter",
+            message_params={"parameter": "overwrite"},
+        )
+    overwrite = overwrite_val
+
+    try:
+        result, export_cancelled = await _await_thread_call_to_completion(
+            export_cloudsave_character_unit,
+            config_manager,
+            name,
+            overwrite=overwrite,
+        )
+    except MaintenanceModeError as exc:
+        return _maintenance_mode_error_response(exc, character_name=name)
+    except CloudsaveOperationError as exc:
+        return _cloudsave_error_response(
+            exc.code,
+            str(exc),
+            status_code=_operation_error_status_code(exc, action="upload"),
+            character_name=name,
+        )
+    except Exception as exc:
+        logger.exception("云存档上传失败: %s", name)
+        return _cloudsave_error_response(
+            "CLOUDSAVE_UPLOAD_FAILED",
+            "Upload failed. Please try again later.",
+            status_code=500,
+            character_name=name,
+        )
+
+    if export_cancelled:
+        raise asyncio.CancelledError
+
+    return {
+        "success": True,
+        "character_name": name,
+        "detail": await _enrich_cloudsave_payload_with_workshop_status(result.get("detail")),
+        "meta": result.get("meta"),
+        "sequence_number": result.get("sequence_number"),
+        "sync_backend": STEAM_AUTO_CLOUD_SYNC_BACKEND,
+        "steam_autocloud": _build_steam_autocloud_payload(config_manager),
+    }
+
+
+async def _rollback_failed_character_download(
+    config_manager, name: str, result: dict, exc: BaseException,
+):
+    """Roll back one applied character download and report the reload failure."""
+    backup_path = str(result.get("backup_path") or "")
+    rollback_attempted = False
+    rollback_error = ""
+    rollback_notify_ok = False
+    try:
+        if backup_path:
+            rollback_attempted = True
+            try:
+                restore_cloudsave_operation_backup(
+                    config_manager, backup_path, recent_locks_held=True,
+                )
+            finally:
+                # 磁盘恢复失败也必须撤销导入期 recent identity；否则
+                # finally 释放文件锁后会把半提交的 redirect/generation 暴露出去。
+                rollback_cloudsave_character_import_registry(result)
+            initialize_character_data = get_initialize_character_data()
+            await initialize_character_data()
+            rollback_notify_ok = await notify_memory_server_reload(
+                reason=f"云存档下载回滚: {name}",
+            )
+            if not rollback_notify_ok:
+                rollback_error = "notify_memory_server_reload returned False"
+    except Exception as rollback_exc:
+        rollback_error = str(rollback_exc)
+    return _cloudsave_error_response(
+        "LOCAL_RELOAD_FAILED_ROLLED_BACK",
+        f"The download was applied, but local reload failed: {exc}",
+        status_code=500,
+        character_name=name,
+        message_params={"message": str(exc)},
+        extra={
+            "rolled_back": rollback_attempted and rollback_error == "" and rollback_notify_ok,
+            "rollback_error": rollback_error,
+        },
+    )
+
+
+async def _complete_cloudsave_character_download(
+    config_manager,
+    name: str,
+    result: dict,
+    release_claim_token: str | None = None,
+):
+    """Reload an applied import or roll it back, then release its retained lock."""
+    try:
+        try:
+            reload_ok, reload_error = await _reload_after_character_download(
+                name,
+                release_claim_token,
+            )
+            if not reload_ok:
+                raise RuntimeError(reload_error or "reload failed")
+        except asyncio.CancelledError as exc:
+            # completion task 本身也可能被 shutdown 直接 cancel；此时仍须在
+            # retained recent locks 下把磁盘和 registry 回滚完，再传播取消。
+            await _rollback_failed_character_download(
+                config_manager, name, result, exc,
+            )
+            raise
+        except Exception as exc:
+            return await _rollback_failed_character_download(
+                config_manager, name, result, exc,
+            )
+        return None
+    finally:
+        finalize_cloudsave_character_import(result)
+
+
+@router.post("/character/{name}/download")
+async def post_cloudsave_character_download(name: str, request: Request):
+    config_manager = get_config_manager()
+    if not is_cloudsave_provider_available(config_manager):
+        return _cloudsave_error_response(
+            "CLOUDSAVE_PROVIDER_UNAVAILABLE",
+            "Cloud save provider is currently unavailable.",
+            status_code=503,
+            character_name=name,
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        return _cloudsave_error_response(
+            "INVALID_JSON_BODY",
+            "Invalid JSON request body.",
+            status_code=400,
+            character_name=name,
+        )
+    overwrite_val = (body or {}).get("overwrite", False)
+    backup_val = (body or {}).get("backup_before_overwrite", True)
+    if not isinstance(overwrite_val, bool):
+        return _cloudsave_error_response(
+            "INVALID_PARAMETER",
+            "Invalid parameter: overwrite must be boolean.",
+            status_code=400,
+            character_name=name,
+            message_key="cloudsave.error.invalidBooleanParameter",
+            message_params={"parameter": "overwrite"},
+        )
+    if "backup_before_overwrite" in (body or {}) and not isinstance(backup_val, bool):
+        return _cloudsave_error_response(
+            "INVALID_PARAMETER",
+            "Invalid parameter: backup_before_overwrite must be boolean.",
+            status_code=400,
+            character_name=name,
+            message_key="cloudsave.error.invalidBooleanParameter",
+            message_params={"parameter": "backup_before_overwrite"},
+        )
+    overwrite = overwrite_val
+    backup_before_overwrite = backup_val
+    force_val = (body or {}).get("force", False)
+    released_memory_handle = False
+    release_needs_resume = False
+    release_claim_token = create_derived_task_claim_token()
+
+    async def _release_local_handle(reason: str) -> bool:
+        nonlocal release_needs_resume
+        # The token is client-owned before the request starts. If cancellation
+        # arrives while HTTP is in flight, wait for its terminal result and
+        # withdraw this exact claim before propagating cancellation.
+        release_needs_resume = True
+        released, release_cancelled = await _await_coroutine_to_completion(
+            release_memory_server_character(
+                name,
+                reason=reason,
+                derived_task_claim_token=release_claim_token,
+            )
+        )
+        if released and not release_cancelled:
+            return True
+        _, resume_cancelled = await _await_coroutine_to_completion(
+            notify_memory_server_reload(
+                reason=f"{reason}（release 失败或取消补偿）",
+                release_derived_task_claims={
+                    name: (release_claim_token,),
+                },
+            )
+        )
+        release_needs_resume = False
+        if release_cancelled or resume_cancelled:
+            raise asyncio.CancelledError
+        return False
+
+    local_exists = _local_character_exists(config_manager, name)
+    if local_exists and not overwrite:
+        cloud_detail = build_cloudsave_character_detail(config_manager, name)
+        if cloud_detail is None:
+            return _cloudsave_error_response(
+                "CLOUD_CHARACTER_NOT_FOUND",
+                f"cloud character not found: {name}",
+                status_code=404,
+                character_name=name,
+            )
+        return _cloudsave_error_response(
+            "LOCAL_CHARACTER_EXISTS",
+            f"local character already exists: {name}",
+            status_code=409,
+            character_name=name,
+        )
+
+    block_reason = _active_session_block_reason(name)
+    if block_reason:
+        if not isinstance(force_val, bool) or not force_val:
+            return _cloudsave_error_response(
+                "ACTIVE_SESSION_BLOCKED",
+                block_reason,
+                status_code=409,
+                character_name=name,
+                extra={"can_force": True},
+            )
+        terminated_ok, terminate_msg = await _force_terminate_session(name)
+        if not terminated_ok:
+            return _cloudsave_error_response(
+                "SESSION_TERMINATE_FAILED",
+                f"Failed to terminate active session: {terminate_msg}",
+                status_code=503,
+                character_name=name,
+                message_params={"message": terminate_msg},
+            )
+        released_memory_handle = await _release_local_handle(
+            f"云存档强制下载前释放 SQLite 句柄: {name}",
+        )
+        if not released_memory_handle:
+            return _cloudsave_error_response(
+                "MEMORY_SERVER_RELEASE_FAILED",
+                "Failed to release the local memory handle before overwrite. Please try again later.",
+                status_code=503,
+                character_name=name,
+            )
+    if local_exists and overwrite and not force_val:
+        released_memory_handle = await _release_local_handle(
+            f"云存档下载前释放 SQLite 句柄: {name}",
+        )
+        if not released_memory_handle:
+            return _cloudsave_error_response(
+                "MEMORY_SERVER_RELEASE_FAILED",
+                "Failed to release the local memory handle before overwrite. Please try again later.",
+                status_code=503,
+                character_name=name,
+            )
+
+    try:
+        # Serialize same-process apply work task-wise. Cross-process contention
+        # is polled without blocking the event loop; Windows mutex ownership
+        # still stays on this thread for both acquire and release.
+        async with _character_download_apply_lock:
+            async with async_cloud_apply_fence(
+                config_manager,
+                mode=ROOT_MODE_BOOTSTRAP_IMPORTING,
+                reason=f"single_character_download:{name}",
+            ):
+                result, import_cancelled = await _await_thread_call_to_completion(
+                    import_cloudsave_character_unit,
+                    config_manager,
+                    name,
+                    overwrite=overwrite,
+                    backup_before_overwrite=backup_before_overwrite,
+                    retain_recent_locks=True,
+                    use_cloud_apply_fence=False,
+                )
+                reload_error_response, completion_cancelled = (
+                    await _await_coroutine_to_completion(
+                        _complete_cloudsave_character_download(
+                            config_manager,
+                            name,
+                            result,
+                            release_claim_token,
+                        ),
+                    )
+                )
+                if reload_error_response is None:
+                    release_needs_resume = False
+    except MaintenanceModeError as exc:
+        return _maintenance_mode_error_response(exc, character_name=name)
+    except CloudsaveOperationError as exc:
+        return _cloudsave_error_response(
+            exc.code,
+            str(exc),
+            status_code=_operation_error_status_code(exc, action="download"),
+            character_name=name,
+        )
+    except Exception as exc:
+        logger.exception("云存档下载失败: %s", name)
+        return _cloudsave_error_response(
+            "CLOUDSAVE_DOWNLOAD_FAILED",
+            "Download failed. Please try again later.",
+            status_code=500,
+            character_name=name,
+        )
+    finally:
+        if release_needs_resume:
+            _, resume_cancelled = await _await_coroutine_to_completion(
+                notify_memory_server_reload(
+                    reason=f"云存档下载中止，恢复角色派生任务: {name}",
+                    release_derived_task_claims={
+                        name: (release_claim_token,),
+                    },
+                )
+            )
+            if resume_cancelled:
+                raise asyncio.CancelledError
+
+    if import_cancelled or completion_cancelled:
+        raise asyncio.CancelledError
+    if reload_error_response is not None:
+        return reload_error_response
+
+    backup_path = str(result.get("backup_path") or "")
+    refreshed_detail = build_cloudsave_character_detail(config_manager, name) or result.get("detail")
+    return {
+        "success": True,
+        "character_name": name,
+        "detail": await _enrich_cloudsave_payload_with_workshop_status(refreshed_detail),
+        "backup_path": backup_path,
+        "sync_backend": STEAM_AUTO_CLOUD_SYNC_BACKEND,
+        "steam_autocloud": _build_steam_autocloud_payload(config_manager),
+    }

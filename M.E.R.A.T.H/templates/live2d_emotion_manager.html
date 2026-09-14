@@ -1,0 +1,1414 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title data-i18n="emotionManager.title">Live2D 情感映射管理器 - Project N.E.K.O.</title>
+    <!-- i18next 加载器（统一处理 CDN 加载和初始化） -->
+    <script src="/static/i18n-i18next.js"></script>
+    <style>
+        :root {
+            /* 品牌核心色 */
+            --color-n-main: #40C5F1;
+            --color-n-deep: #22b3ff;
+            --color-n-light: #e3f4ff;
+            --color-n-border: #b3e5fc;
+
+            /* 语义状态色 */
+            --color-success: #2ecc71;
+            --color-error: #ff5252;
+            --color-warning: #f39c12;
+
+            /* 文字色 */
+            --color-text-main: #40C5F1;
+            --color-text-dark: #222222;
+            --color-text-muted: #666666;
+
+            /* 圆角与间距 */
+            --radius-capsule: 50px;
+            --radius-card: 20px;
+            --spacing-sm: 8px;
+            --spacing-md: 12px;
+            --spacing-lg: 16px;
+            --spacing-xl: 24px;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Source Han Sans CN', 'Noto Sans SC', '微软雅黑', 'Segoe UI', Arial, sans-serif;
+            background: transparent;
+            color: var(--color-text-dark);
+            padding: 0;
+            margin: 0;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 100%;
+            margin: 0;
+            background: white;
+            border-radius: 0;
+            box-shadow: none;
+            overflow: hidden;
+            min-height: 100vh;
+        }
+
+        .header {
+            background: var(--color-n-main);
+            padding: 24px;
+            border-radius: 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            -webkit-app-region: drag;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 100;
+        }
+
+        .header-content {
+            flex: 1;
+        }
+
+        .close-btn {
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            padding: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: transform 0.2s ease, opacity 0.2s ease;
+            opacity: 0.9;
+            -webkit-app-region: no-drag;
+        }
+
+        .close-btn:hover {
+            transform: scale(1.1);
+            opacity: 1;
+        }
+
+        .close-btn:active {
+            transform: scale(0.95);
+        }
+
+        .close-btn img {
+            width: 32px;
+            height: 32px;
+            object-fit: contain;
+            -webkit-user-drag: none;
+            user-select: none;
+        }
+
+        .header h1 {
+            position: relative;
+            color: transparent;
+            font-size: 28px;
+            font-weight: bold;
+            margin-bottom: var(--spacing-sm);
+            display: inline-block;
+            --button-text-stroke-color: var(--color-n-deep);
+        }
+
+        .header h1::before {
+            content: attr(data-text);
+            position: absolute;
+            left: 0;
+            top: 0;
+            -webkit-text-stroke: 1px var(--button-text-stroke-color);
+            text-shadow:
+                2px 0 0 var(--button-text-stroke-color), -2px 0 0 var(--button-text-stroke-color),
+                0 2px 0 var(--button-text-stroke-color), 0 -2px 0 var(--button-text-stroke-color),
+                1px 1px 0 var(--button-text-stroke-color), -1px -1px 0 var(--button-text-stroke-color),
+                1px -1px 0 var(--button-text-stroke-color), -1px 1px 0 var(--button-text-stroke-color),
+                2px 2px 0 var(--button-text-stroke-color), -2px -2px 0 var(--button-text-stroke-color),
+                2px -2px 0 var(--button-text-stroke-color), -2px 2px 0 var(--button-text-stroke-color);
+            z-index: -1;
+        }
+
+        .header h1::after {
+            content: attr(data-text);
+            position: absolute;
+            left: 0;
+            top: 0;
+            background: linear-gradient(to bottom, #96e8ff, #e3f4ff, #ffffff);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            z-index: 10;
+        }
+
+        .header p {
+            color: white;
+            font-size: 14px;
+            margin: 0;
+        }
+
+        .container-content {
+            padding: var(--spacing-xl);
+            padding-top: 130px;
+        }
+
+        .field-row {
+            margin-bottom: var(--spacing-lg);
+        }
+
+        .field-row label {
+            display: block;
+            color: var(--color-text-main);
+            font-size: 14px;
+            font-weight: 500;
+            margin-bottom: var(--spacing-sm);
+        }
+
+        .field-row select {
+            display: none;
+        }
+
+        /* Custom Single-select Styles (for model select) */
+        .custom-singleselect {
+            position: relative;
+            width: 100%;
+        }
+
+        .singleselect-header {
+            width: 100%;
+            padding: 12px 16px;
+            background: white;
+            border: 2px solid var(--color-n-border);
+            border-radius: var(--radius-capsule);
+            color: var(--color-text-main);
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            min-height: 46px;
+            user-select: none;
+        }
+
+        .singleselect-header:hover {
+            border-color: var(--color-n-main);
+            transform: translateY(-1px);
+        }
+
+        .singleselect-header::after {
+            content: '';
+            width: 12px;
+            height: 12px;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2340C5F1' d='M6 9L1 4h10z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: center;
+            transition: transform 0.2s ease;
+        }
+
+        .custom-singleselect.active .singleselect-header::after {
+            transform: rotate(180deg);
+        }
+
+        .singleselect-options {
+            position: absolute;
+            top: calc(100% + 8px);
+            left: 0;
+            width: 100%;
+            background: white;
+            border: 2px solid var(--color-n-border);
+            border-radius: var(--radius-card);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+            z-index: 100;
+            max-height: 250px;
+            overflow-y: auto;
+            display: none;
+            padding: var(--spacing-sm);
+            scrollbar-width: thin;
+            scrollbar-color: #96e8ff #f0f8ff;
+        }
+
+        .singleselect-options.has-scrollbar {
+            border-radius: var(--radius-card) 0 0 var(--radius-card);
+        }
+
+        .singleselect-options::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .singleselect-options::-webkit-scrollbar-track {
+            background: #f0f8ff;
+            border-radius: 4px;
+        }
+
+        .singleselect-options::-webkit-scrollbar-thumb {
+            background: #96e8ff;
+            border-radius: 4px;
+        }
+
+        .singleselect-options::-webkit-scrollbar-thumb:hover {
+            background: #7dd3ff;
+        }
+
+        .custom-singleselect.active .singleselect-options {
+            display: block;
+        }
+
+        .custom-singleselect.active.open-up .singleselect-options {
+            top: auto;
+            bottom: calc(100% + 8px);
+        }
+
+        .custom-singleselect.active.open-up .singleselect-header::after {
+            transform: rotate(180deg);
+        }
+
+        .custom-singleselect.active.open-down .singleselect-header::after {
+            transform: rotate(0deg);
+        }
+
+        .singleselect-item {
+            padding: 10px 12px;
+            border-radius: var(--spacing-sm);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            transition: background 0.2s ease;
+            font-size: 14px;
+            color: var(--color-text-dark);
+        }
+
+        .singleselect-item:hover {
+            background: var(--color-n-light);
+        }
+
+        .singleselect-item.selected {
+            background: var(--color-n-light);
+            color: var(--color-n-deep);
+        }
+
+        /* Custom Multi-select Styles */
+        .custom-multiselect {
+            position: relative;
+            width: 100%;
+        }
+
+        .multiselect-header {
+            width: 100%;
+            padding: 12px 16px;
+            background: white;
+            border: 2px solid var(--color-n-border);
+            border-radius: var(--radius-capsule);
+            color: var(--color-text-main);
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            min-height: 46px;
+            user-select: none;
+        }
+
+        .multiselect-header:hover {
+            border-color: var(--color-n-main);
+            transform: translateY(-1px);
+        }
+
+        .multiselect-header::after {
+            content: '';
+            width: 12px;
+            height: 12px;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2340C5F1' d='M6 9L1 4h10z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: center;
+            transition: transform 0.2s ease;
+        }
+
+        .custom-multiselect.active .multiselect-header::after {
+            transform: rotate(180deg);
+        }
+
+        .multiselect-options {
+            position: absolute;
+            top: calc(100% + 8px);
+            left: 0;
+            width: 100%;
+            background: white;
+            border: 2px solid var(--color-n-border);
+            border-radius: var(--radius-card);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+            z-index: 100;
+            max-height: 250px;
+            overflow-y: auto;
+            display: none;
+            padding: var(--spacing-sm);
+            scrollbar-width: thin;
+            scrollbar-color: #96e8ff #f0f8ff;
+        }
+
+        .multiselect-options.has-scrollbar {
+            border-radius: var(--radius-card) 0 0 var(--radius-card);
+        }
+
+        .multiselect-options::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .multiselect-options::-webkit-scrollbar-track {
+            background: #f0f8ff;
+            border-radius: 4px;
+        }
+
+        .multiselect-options::-webkit-scrollbar-thumb {
+            background: #96e8ff;
+            border-radius: 4px;
+        }
+
+        .multiselect-options::-webkit-scrollbar-thumb:hover {
+            background: #7dd3ff;
+        }
+
+        .custom-multiselect.active .multiselect-options {
+            display: block;
+        }
+
+        .custom-multiselect.active.open-up .multiselect-options {
+            top: auto;
+            bottom: calc(100% + 8px);
+        }
+
+        .custom-multiselect.active.open-up .multiselect-header::after {
+            transform: rotate(180deg);
+        }
+
+        .custom-multiselect.active.open-down .multiselect-header::after {
+            transform: rotate(0deg);
+        }
+
+        .multiselect-item {
+            padding: 10px 12px;
+            border-radius: var(--spacing-sm);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            transition: background 0.2s ease;
+            font-size: 13px;
+            color: var(--color-text-dark);
+        }
+
+        .multiselect-item:hover {
+            background: var(--color-n-light);
+        }
+
+        .multiselect-item input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            cursor: pointer;
+            accent-color: var(--color-n-main);
+        }
+
+        .multiselect-item span {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .multiselect-header .selected-text {
+            flex: 1;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            overflow: hidden;
+            max-height: 70px; /* 限制高度，防止过多标签撑开太大 */
+        }
+
+        .selected-tag {
+            background: var(--color-n-light);
+            color: var(--color-n-deep);
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            border: 1px solid var(--color-n-border);
+            white-space: nowrap;
+            max-width: 120px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .multiselect-header .selected-count {
+            background: var(--color-n-main);
+            color: white;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 12px;
+            margin-left: 8px;
+            flex-shrink: 0;
+        }
+
+        .emotion-section {
+            margin-bottom: var(--spacing-xl);
+            padding: var(--spacing-lg);
+            background: var(--color-n-light);
+            border-radius: var(--radius-card);
+            border: 2px solid var(--color-n-border);
+        }
+
+        .emotion-header {
+            color: var(--color-text-main);
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: var(--spacing-md);
+            display: flex;
+            align-items: center;
+            gap: var(--spacing-sm);
+        }
+
+        .emotion-header::before {
+            content: '';
+            width: 4px;
+            height: 20px;
+            background: var(--color-n-main);
+            border-radius: 2px;
+        }
+
+        .select-group {
+            margin-bottom: var(--spacing-md);
+        }
+
+        .select-group:last-child {
+            margin-bottom: 0;
+        }
+
+        .select-group label {
+            display: block;
+            color: var(--color-text-muted);
+            font-size: 13px;
+            margin-bottom: 6px;
+        }
+
+        .button-group {
+            display: flex;
+            gap: var(--spacing-md);
+            margin-top: var(--spacing-xl);
+        }
+
+        .btn {
+            flex: 1;
+            padding: 14px 24px;
+            border: none;
+            border-radius: var(--radius-capsule);
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        }
+
+        .btn:active {
+            transform: translateY(1px) scale(0.98);
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--color-n-main) 0%, var(--color-n-deep) 100%);
+            color: white;
+        }
+
+        .btn-secondary {
+            background: white;
+            color: var(--color-text-main);
+            border: 2px solid var(--color-n-border);
+        }
+
+        .btn-secondary:hover {
+            border-color: var(--color-n-main);
+            background: var(--color-n-light);
+        }
+
+        .status-message {
+            margin-top: var(--spacing-lg);
+            padding: var(--spacing-md);
+            border-radius: var(--radius-card);
+            font-size: 14px;
+            display: none;
+            animation: slideIn 0.3s ease;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .status-success {
+            background: rgba(46, 204, 113, 0.1);
+            border: 2px solid var(--color-success);
+            color: var(--color-success);
+        }
+
+        .status-error {
+            background: rgba(255, 82, 82, 0.1);
+            border: 2px solid var(--color-error);
+            color: var(--color-error);
+        }
+
+        .status-info {
+            background: rgba(64, 197, 241, 0.1);
+            border: 2px solid var(--color-n-main);
+            color: var(--color-text-main);
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: var(--color-text-muted);
+        }
+
+        .loading::after {
+            content: '...';
+            animation: dots 1.5s steps(4, end) infinite;
+        }
+
+        @keyframes dots {
+            0%, 20% { content: '.'; }
+            40% { content: '..'; }
+            60%, 100% { content: '...'; }
+        }
+
+        @media (max-width: 600px) {
+            body {
+                padding: var(--spacing-md);
+            }
+
+            .container {
+                padding: var(--spacing-lg);
+            }
+
+            .header h1 {
+                font-size: 24px;
+            }
+
+            .button-group {
+                flex-direction: column;
+            }
+        }
+    </style>
+
+    <link rel="stylesheet" href="/static/css/window_controls.css">
+    <link rel="stylesheet" href="/static/css/dark-mode.css">
+    <script src="/static/theme-manager.js"></script>
+    <script src="/static/js/window_controls.js" defer></script>
+    <link rel="stylesheet" href="/static/libs/driver.min.css?v={{ static_asset_version|default('0', true) }}">
+    <link rel="stylesheet" href="/static/css/tutorial-styles.css?v={{ static_asset_version|default('0', true) }}">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="header-content">
+                <h1 data-text="Live2D 情感映射管理器" data-i18n="emotionManager.pageTitle">Live2D 情感映射管理器</h1>
+                <p data-i18n="emotionManager.subtitle">配置不同情绪下的动作和表情</p>
+            </div>
+            <div class="neko-window-controls">
+                <button type="button" class="neko-window-control-btn" data-neko-window-control="minimize" data-i18n-title="common.minimize" data-i18n-aria="common.minimize" title="最小化" aria-label="最小化">
+                    <span class="neko-window-minimize-icon"></span>
+                </button>
+                <button type="button" class="neko-window-control-btn" data-neko-window-control="maximize" data-i18n-title="common.maximize" data-i18n-aria="common.maximize" title="最大化" aria-label="最大化">
+                    <span class="neko-window-maximize-icon"></span>
+                </button>
+                <button class="close-btn" data-neko-window-control="close" title="关闭" data-i18n-title="common.close" data-i18n-aria="common.close" aria-label="关闭">
+                    <img src="/static/icons/close_button.png" alt="关闭" data-i18n-alt="common.close" draggable="false">
+                </button>
+            </div>
+        </div>
+
+        <div class="container-content">
+            <div class="field-row">
+                <label for="model-select" data-i18n="emotionManager.selectModel">选择 Live2D 模型</label>
+                <select id="model-select" style="display: none;">
+                    <option value="" data-i18n="common.loading">加载中...</option>
+                </select>
+                <div class="custom-singleselect" id="model-singleselect">
+                    <div class="singleselect-header" tabindex="0" role="button" aria-haspopup="listbox" aria-expanded="false">
+                        <span class="selected-text" data-i18n="common.loading">加载中...</span>
+                    </div>
+                    <div class="singleselect-options"></div>
+                </div>
+            </div>
+
+            <div id="emotion-config" style="display: none;">
+            <!-- Happy -->
+            <div class="emotion-section">
+                <div class="emotion-header" data-i18n="emotionManager.emotions.happy">开心 (Happy)</div>
+                <div class="select-group">
+                    <label data-i18n="emotionManager.motion">动作</label>
+                    <div class="custom-multiselect emotion-motion-select" data-emotion="happy">
+                        <div class="multiselect-header" tabindex="0" role="button" aria-haspopup="listbox" aria-expanded="false">
+                            <span class="selected-text" data-i18n="emotionManager.selectMotion">选择动作</span>
+                        </div>
+                        <div class="multiselect-options"></div>
+                    </div>
+                </div>
+                <div class="select-group">
+                    <label data-i18n="emotionManager.expression">表情</label>
+                    <div class="custom-multiselect emotion-expression-select" data-emotion="happy">
+                        <div class="multiselect-header" tabindex="0" role="button" aria-haspopup="listbox" aria-expanded="false">
+                            <span class="selected-text" data-i18n="emotionManager.selectExpression">选择表情</span>
+                        </div>
+                        <div class="multiselect-options"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Sad -->
+            <div class="emotion-section">
+                <div class="emotion-header" data-i18n="emotionManager.emotions.sad">悲伤 (Sad)</div>
+                <div class="select-group">
+                    <label data-i18n="emotionManager.motion">动作</label>
+                    <div class="custom-multiselect emotion-motion-select" data-emotion="sad">
+                        <div class="multiselect-header" tabindex="0" role="button" aria-haspopup="listbox" aria-expanded="false">
+                            <span class="selected-text" data-i18n="emotionManager.selectMotion">选择动作</span>
+                        </div>
+                        <div class="multiselect-options"></div>
+                    </div>
+                </div>
+                <div class="select-group">
+                    <label data-i18n="emotionManager.expression">表情</label>
+                    <div class="custom-multiselect emotion-expression-select" data-emotion="sad">
+                        <div class="multiselect-header" tabindex="0" role="button" aria-haspopup="listbox" aria-expanded="false">
+                            <span class="selected-text" data-i18n="emotionManager.selectExpression">选择表情</span>
+                        </div>
+                        <div class="multiselect-options"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Angry -->
+            <div class="emotion-section">
+                <div class="emotion-header" data-i18n="emotionManager.emotions.angry">生气 (Angry)</div>
+                <div class="select-group">
+                    <label data-i18n="emotionManager.motion">动作</label>
+                    <div class="custom-multiselect emotion-motion-select" data-emotion="angry">
+                        <div class="multiselect-header" tabindex="0" role="button" aria-haspopup="listbox" aria-expanded="false">
+                            <span class="selected-text" data-i18n="emotionManager.selectMotion">选择动作</span>
+                        </div>
+                        <div class="multiselect-options"></div>
+                    </div>
+                </div>
+                <div class="select-group">
+                    <label data-i18n="emotionManager.expression">表情</label>
+                    <div class="custom-multiselect emotion-expression-select" data-emotion="angry">
+                        <div class="multiselect-header" tabindex="0" role="button" aria-haspopup="listbox" aria-expanded="false">
+                            <span class="selected-text" data-i18n="emotionManager.selectExpression">选择表情</span>
+                        </div>
+                        <div class="multiselect-options"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Neutral -->
+            <div class="emotion-section">
+                <div class="emotion-header" data-i18n="emotionManager.emotions.neutral">平静 (Neutral)</div>
+                <div class="select-group">
+                    <label data-i18n="emotionManager.motion">动作</label>
+                    <div class="custom-multiselect emotion-motion-select" data-emotion="neutral">
+                        <div class="multiselect-header" tabindex="0" role="button" aria-haspopup="listbox" aria-expanded="false">
+                            <span class="selected-text" data-i18n="emotionManager.selectMotion">选择动作</span>
+                        </div>
+                        <div class="multiselect-options"></div>
+                    </div>
+                </div>
+                <div class="select-group">
+                    <label data-i18n="emotionManager.expression">表情</label>
+                    <div class="custom-multiselect emotion-expression-select" data-emotion="neutral">
+                        <div class="multiselect-header" tabindex="0" role="button" aria-haspopup="listbox" aria-expanded="false">
+                            <span class="selected-text" data-i18n="emotionManager.selectExpression">选择表情</span>
+                        </div>
+                        <div class="multiselect-options"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Surprised -->
+            <div class="emotion-section">
+                <div class="emotion-header" data-i18n="emotionManager.emotions.surprised">惊讶 (Surprised)</div>
+                <div class="select-group">
+                    <label data-i18n="emotionManager.motion">动作</label>
+                    <div class="custom-multiselect emotion-motion-select" data-emotion="surprised">
+                        <div class="multiselect-header" tabindex="0" role="button" aria-haspopup="listbox" aria-expanded="false">
+                            <span class="selected-text" data-i18n="emotionManager.selectMotion">选择动作</span>
+                        </div>
+                        <div class="multiselect-options"></div>
+                    </div>
+                </div>
+                <div class="select-group">
+                    <label data-i18n="emotionManager.expression">表情</label>
+                    <div class="custom-multiselect emotion-expression-select" data-emotion="surprised">
+                        <div class="multiselect-header" tabindex="0" role="button" aria-haspopup="listbox" aria-expanded="false">
+                            <span class="selected-text" data-i18n="emotionManager.selectExpression">选择表情</span>
+                        </div>
+                        <div class="multiselect-options"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Idle -->
+            <div class="emotion-section">
+                <div class="emotion-header" data-i18n="emotionManager.emotions.idle">待机 (Idle)</div>
+                <div class="select-group">
+                    <label data-i18n="emotionManager.motion">动作</label>
+                    <div class="custom-multiselect emotion-motion-select" data-emotion="Idle">
+                        <div class="multiselect-header" tabindex="0" role="button" aria-haspopup="listbox" aria-expanded="false">
+                            <span class="selected-text" data-i18n="emotionManager.selectMotion">选择动作</span>
+                        </div>
+                        <div class="multiselect-options"></div>
+                    </div>
+                </div>
+                <div class="select-group">
+                    <label data-i18n="emotionManager.expression">表情</label>
+                    <div class="custom-multiselect emotion-expression-select" data-emotion="Idle">
+                        <div class="multiselect-header" tabindex="0" role="button" aria-haspopup="listbox" aria-expanded="false">
+                            <span class="selected-text" data-i18n="emotionManager.selectExpression">选择表情</span>
+                        </div>
+                        <div class="multiselect-options"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="button-group">
+                <button id="save-btn" class="btn btn-primary" data-i18n="emotionManager.saveConfig">保存配置</button>
+                <button id="reset-btn" class="btn btn-secondary" data-i18n="common.reset">重置</button>
+            </div>
+
+            <div id="status-message" class="status-message"></div>
+        </div>
+        </div>
+    </div>
+
+    <script>
+        const modelSelect = document.getElementById('model-select');
+        const modelSingleselect = document.getElementById('model-singleselect');
+        const modelSingleselectHeader = modelSingleselect.querySelector('.singleselect-header');
+        const modelSingleselectText = modelSingleselect.querySelector('.selected-text');
+        const modelSingleselectOptions = modelSingleselect.querySelector('.singleselect-options');
+        const emotionConfig = document.getElementById('emotion-config');
+        const saveBtn = document.getElementById('save-btn');
+        const resetBtn = document.getElementById('reset-btn');
+        const statusMessage = document.getElementById('status-message');
+
+        const emotions = ['happy', 'sad', 'angry', 'neutral', 'surprised', 'Idle'];
+        let currentModelInfo = null;
+        let availableMotions = [];
+        let availableExpressions = [];
+        let currentSelectionId = 0;
+
+        // 下拉菜单位置计算辅助函数
+        function computeDropdownPlacement(header, options, maxHeight = 250) {
+            const viewportHeight = window.innerHeight;
+            const headerRect = header.getBoundingClientRect();
+            const optionsHeight = Math.min(options.scrollHeight, maxHeight);
+            const gap = 8;
+            const spaceBelow = viewportHeight - headerRect.bottom - gap;
+            const spaceAbove = headerRect.top - gap;
+            
+            let placement, maxHeightValue;
+            
+            if (spaceBelow >= optionsHeight) {
+                placement = 'open-down';
+                maxHeightValue = maxHeight;
+            } else if (spaceAbove >= optionsHeight) {
+                placement = 'open-up';
+                maxHeightValue = maxHeight;
+            } else if (spaceBelow > spaceAbove) {
+                placement = 'open-down';
+                maxHeightValue = Math.floor(spaceBelow);
+            } else {
+                placement = 'open-up';
+                maxHeightValue = Math.floor(spaceAbove);
+            }
+            
+            return { placement, maxHeight: maxHeightValue };
+        }
+
+        // 应用下拉菜单位置
+        function applyDropdownDirection(container, header, options, maxHeight = 250) {
+            const { placement, maxHeight: computedMaxHeight } = computeDropdownPlacement(header, options, maxHeight);
+            
+            container.classList.toggle('open-up', placement === 'open-up');
+            container.classList.toggle('open-down', placement === 'open-down');
+            options.style.maxHeight = `${computedMaxHeight}px`;
+            
+            requestAnimationFrame(() => {
+                if (options.scrollHeight > options.clientHeight) {
+                    options.classList.add('has-scrollbar');
+                } else {
+                    options.classList.remove('has-scrollbar');
+                }
+            });
+        }
+
+        // i18n 辅助函数
+        function t(key, paramsOrFallback) {
+            if (typeof window.t === 'function') {
+                return window.t(key, paramsOrFallback);
+            }
+            if (typeof i18next !== 'undefined' && i18next.isInitialized) {
+                return i18next.t(key, paramsOrFallback);
+            }
+            if (typeof paramsOrFallback === 'string') {
+                return paramsOrFallback;
+            }
+            return key;
+        }
+
+        function isI18nReady() {
+            const i18nInstance = window.i18n || (typeof i18next !== 'undefined' ? i18next : null);
+            return typeof window.t === 'function' && !!(i18nInstance && i18nInstance.isInitialized);
+        }
+
+        function waitForI18nReady(timeoutMs = 5000) {
+            return new Promise(resolve => {
+                if (isI18nReady()) {
+                    resolve();
+                    return;
+                }
+
+                let pollTimer = null;
+                let timeoutTimer = null;
+
+                const cleanup = () => {
+                    if (pollTimer) {
+                        clearInterval(pollTimer);
+                        pollTimer = null;
+                    }
+                    if (timeoutTimer) {
+                        clearTimeout(timeoutTimer);
+                        timeoutTimer = null;
+                    }
+                    window.removeEventListener('localechange', onLocaleReady);
+                };
+
+                const onLocaleReady = () => {
+                    if (!isI18nReady()) {
+                        return;
+                    }
+                    cleanup();
+                    resolve();
+                };
+
+                window.addEventListener('localechange', onLocaleReady);
+                pollTimer = setInterval(onLocaleReady, 100);
+                timeoutTimer = setTimeout(() => {
+                    cleanup();
+                    resolve();
+                }, timeoutMs);
+            });
+        }
+
+        // 显示状态消息
+        function showStatus(message, type = 'info') {
+            statusMessage.textContent = message;
+            statusMessage.className = `status-message status-${type}`;
+            statusMessage.style.display = 'block';
+
+            setTimeout(() => {
+                statusMessage.style.display = 'none';
+            }, 3000);
+        }
+
+        // 加载模型列表
+        async function loadModelList() {
+            try {
+                const response = await fetch('/api/live2d/models');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                const models = await response.json();
+
+                if (Array.isArray(models) && models.length > 0) {
+                    modelSelect.innerHTML = `<option value="">${t('emotionManager.pleaseSelectModel')}</option>`;
+                    modelSingleselectOptions.innerHTML = '';
+
+                    models.forEach(model => {
+                        const option = document.createElement('option');
+                        option.value = model.name;
+                        option.textContent = model.name;
+                        option.dataset.info = JSON.stringify(model);
+                        modelSelect.appendChild(option);
+
+                        const item = document.createElement('div');
+                        item.className = 'singleselect-item';
+                        item.setAttribute('role', 'option');
+                        item.setAttribute('tabindex', '0');
+                        item.setAttribute('aria-selected', 'false');
+                        item.dataset.value = model.name;
+                        item.dataset.info = JSON.stringify(model);
+                        item.textContent = model.name;
+                        item.addEventListener('click', () => selectModelFromDropdown(model.name, model));
+                        item.addEventListener('keydown', (e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault();
+                                selectModelFromDropdown(model.name, model);
+                                modelSingleselect.classList.remove('active', 'open-up', 'open-down');
+                                modelSingleselectHeader.setAttribute('aria-expanded', 'false');
+                            }
+                        });
+                        modelSingleselectOptions.appendChild(item);
+                    });
+
+                    modelSingleselectText.textContent = t('emotionManager.pleaseSelectModel');
+                } else {
+                    modelSelect.innerHTML = `<option value="">${t('emotionManager.noModelsFound')}</option>`;
+                    modelSingleselectOptions.innerHTML = '';
+                    modelSingleselectText.textContent = t('emotionManager.noModelsFound');
+                    showStatus(t('emotionManager.noModelsFound'), 'error');
+                }
+            } catch (error) {
+                console.error('加载模型列表失败:', error);
+                showStatus(t('emotionManager.loadModelListFailed') + ': ' + error.message, 'error');
+            }
+        }
+
+        // 从下拉框选择模型
+        function selectModelFromDropdown(modelName, modelInfo) {
+            currentSelectionId++;
+            const selectionId = currentSelectionId;
+            
+            currentModelInfo = modelInfo;
+            modelSelect.value = modelName;
+            modelSingleselectText.textContent = modelName;
+            modelSingleselect.classList.remove('active', 'open-up', 'open-down');
+            modelSingleselectHeader.setAttribute('aria-expanded', 'false');
+            
+            modelSingleselectOptions.querySelectorAll('.singleselect-item').forEach(item => {
+                const isSelected = item.dataset.value === modelName;
+                item.classList.toggle('selected', isSelected);
+                item.setAttribute('aria-selected', isSelected ? 'true' : 'false');
+            });
+
+            loadModelFiles(modelName, modelInfo, selectionId).then((success) => {
+                if (success && selectionId === currentSelectionId) {
+                    loadEmotionMapping(modelName);
+                }
+            });
+        }
+
+        // 切换模型选择下拉框
+        function toggleModelDropdown(event) {
+            const wasActive = modelSingleselect.classList.contains('active');
+
+            document.querySelectorAll('.custom-multiselect').forEach(ms => {
+                ms.classList.remove('active', 'open-up', 'open-down');
+                const h = ms.querySelector('.multiselect-header');
+                if (h) h.setAttribute('aria-expanded', 'false');
+            });
+
+            if (wasActive) {
+                modelSingleselect.classList.remove('active', 'open-up', 'open-down');
+                modelSingleselectHeader.setAttribute('aria-expanded', 'false');
+            } else {
+                modelSingleselect.classList.add('active');
+                modelSingleselectHeader.setAttribute('aria-expanded', 'true');
+                
+                // 检测下拉菜单是否超出视口，选择展开方向
+                applyDropdownDirection(modelSingleselect, modelSingleselectHeader, modelSingleselectOptions, 250);
+            }
+
+            event.stopPropagation();
+        }
+
+        modelSingleselectHeader.addEventListener('click', toggleModelDropdown);
+        modelSingleselectHeader.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                toggleModelDropdown(e);
+            }
+        });
+
+        // 加载模型文件列表
+        async function loadModelFiles(modelName, modelInfo, selectionId) {
+            try {
+                let apiUrl = '';
+                if (modelInfo.source === 'user_mods') {
+                    apiUrl = `/api/live2d/model_files/${encodeURIComponent(modelName)}`;
+                } else if (modelInfo.item_id) {
+                    apiUrl = `/api/live2d/model_files_by_id/${modelInfo.item_id}`;
+                } else {
+                    apiUrl = `/api/live2d/model_files/${encodeURIComponent(modelName)}`;
+                }
+
+                const response = await fetch(apiUrl);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                const data = await response.json();
+
+                // 检查是否仍然是当前选择
+                if (selectionId !== currentSelectionId) {
+                    return false;
+                }
+
+                if (data.success) {
+                    availableMotions = data.motion_files || [];
+                    availableExpressions = data.expression_files || [];
+                    populateSelects();
+                    emotionConfig.style.display = 'block';
+                    return true;
+                } else {
+                    showStatus(t('emotionManager.loadModelFilesFailed') + ': ' + (data.error || t('common.unknownError')), 'error');
+                    return false;
+                }
+            } catch (error) {
+                console.error('加载模型文件失败:', error);
+                
+                // 检查是否仍然是当前选择
+                if (selectionId !== currentSelectionId) {
+                    return false;
+                }
+                
+                showStatus(t('emotionManager.loadModelFilesFailed') + ': ' + error.message, 'error');
+                return false;
+            }
+        }
+
+        // 切换下拉菜单
+        function toggleDropdown(event) {
+            const multiselect = event.currentTarget.closest('.custom-multiselect');
+            const header = multiselect.querySelector('.multiselect-header');
+            const options = multiselect.querySelector('.multiselect-options');
+            const wasActive = multiselect.classList.contains('active');
+
+            // 关闭所有其他下拉菜单
+            document.querySelectorAll('.custom-multiselect').forEach(ms => {
+                ms.classList.remove('active', 'open-up', 'open-down');
+                const h = ms.querySelector('.multiselect-header');
+                if (h) h.setAttribute('aria-expanded', 'false');
+            });
+            modelSingleselect.classList.remove('active', 'open-up', 'open-down');
+            modelSingleselectHeader.setAttribute('aria-expanded', 'false');
+
+            if (!wasActive) {
+                multiselect.classList.add('active');
+                if (header) header.setAttribute('aria-expanded', 'true');
+                
+                // 检测下拉菜单是否超出视口，选择展开方向
+                if (options) {
+                    applyDropdownDirection(multiselect, header, options, 250);
+                }
+            }
+
+            event.stopPropagation();
+        }
+
+        // 点击外部关闭下拉菜单
+        window.addEventListener('click', () => {
+            document.querySelectorAll('.custom-multiselect').forEach(ms => {
+                ms.classList.remove('active', 'open-up', 'open-down');
+                const h = ms.querySelector('.multiselect-header');
+                if (h) h.setAttribute('aria-expanded', 'false');
+            });
+            modelSingleselect.classList.remove('active', 'open-up', 'open-down');
+            modelSingleselectHeader.setAttribute('aria-expanded', 'false');
+        });
+
+        // 更新头部显示
+        function updateMultiselectHeader(multiselect) {
+            const checkboxes = multiselect.querySelectorAll('input[type="checkbox"]:checked');
+            const headerContainer = multiselect.querySelector('.selected-text');
+            const isMotion = multiselect.classList.contains('emotion-motion-select');
+
+            headerContainer.innerHTML = '';
+
+            if (checkboxes.length === 0) {
+                headerContainer.textContent = isMotion ? t('emotionManager.selectMotion') : t('emotionManager.selectExpression');
+            } else {
+                checkboxes.forEach(cb => {
+                    const label = cb.closest('.multiselect-item').querySelector('span').textContent;
+                    // 去掉 .motion3.json 或 .exp3.json 后缀
+                    const cleanLabel = label.replace(/\.(motion3|exp3)\.json$/, '');
+                    const tag = document.createElement('span');
+                    tag.className = 'selected-tag';
+                    tag.textContent = cleanLabel;
+                    headerContainer.appendChild(tag);
+                });
+            }
+        }
+
+        // 填充下拉菜单
+        function populateSelects() {
+            emotions.forEach(emotion => {
+                const motionContainer = document.querySelector(`.emotion-motion-select[data-emotion="${emotion}"] .multiselect-options`);
+                const expressionContainer = document.querySelector(`.emotion-expression-select[data-emotion="${emotion}"] .multiselect-options`);
+
+                if (motionContainer) {
+                    motionContainer.innerHTML = '';
+                    // 防止点击选项列表时关闭下拉框
+                    motionContainer.onclick = (e) => e.stopPropagation();
+
+                    availableMotions.forEach(motion => {
+                        const item = document.createElement('div');
+                        item.className = 'multiselect-item';
+                        item.setAttribute('role', 'option');
+                        const fileName = motion.split('/').pop();
+                        const cleanFileName = fileName.replace(/\.(motion3|exp3)\.json$/, '');
+                        
+                        const checkbox = document.createElement('input');
+                        checkbox.type = 'checkbox';
+                        checkbox.value = motion;
+                        checkbox.setAttribute('aria-label', cleanFileName);
+                        
+                        const span = document.createElement('span');
+                        span.textContent = cleanFileName;
+                        
+                        item.appendChild(checkbox);
+                        item.appendChild(span);
+
+                        item.addEventListener('click', (e) => {
+                            if (e.target.tagName !== 'INPUT') {
+                                checkbox.checked = !checkbox.checked;
+                            }
+                            updateMultiselectHeader(motionContainer.closest('.custom-multiselect'));
+                            e.stopPropagation(); // 再次确保不冒泡
+                        });
+                        motionContainer.appendChild(item);
+                    });
+                    // 初始化头部
+                    updateMultiselectHeader(motionContainer.closest('.custom-multiselect'));
+                    // 绑定点击事件到 header
+                    const header = motionContainer.closest('.custom-multiselect').querySelector('.multiselect-header');
+                    header.onclick = toggleDropdown;
+                    header.onkeydown = (e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            toggleDropdown(e);
+                        }
+                    };
+                }
+
+                if (expressionContainer) {
+                    expressionContainer.innerHTML = '';
+                    // 防止点击选项列表时关闭下拉框
+                    expressionContainer.onclick = (e) => e.stopPropagation();
+
+                    availableExpressions.forEach(expression => {
+                        const item = document.createElement('div');
+                        item.className = 'multiselect-item';
+                        item.setAttribute('role', 'option');
+                        const fileName = expression.split('/').pop();
+                        const cleanFileName = fileName.replace(/\.(motion3|exp3)\.json$/, '');
+                        
+                        const checkbox = document.createElement('input');
+                        checkbox.type = 'checkbox';
+                        checkbox.value = expression;
+                        checkbox.setAttribute('aria-label', cleanFileName);
+                        
+                        const span = document.createElement('span');
+                        span.textContent = cleanFileName;
+                        
+                        item.appendChild(checkbox);
+                        item.appendChild(span);
+
+                        item.addEventListener('click', (e) => {
+                            if (e.target.tagName !== 'INPUT') {
+                                checkbox.checked = !checkbox.checked;
+                            }
+                            updateMultiselectHeader(expressionContainer.closest('.custom-multiselect'));
+                            e.stopPropagation(); // 再次确保不冒泡
+                        });
+                        expressionContainer.appendChild(item);
+                    });
+                    // 初始化头部
+                    updateMultiselectHeader(expressionContainer.closest('.custom-multiselect'));
+                    // 绑定点击事件到 header
+                    const header = expressionContainer.closest('.custom-multiselect').querySelector('.multiselect-header');
+                    header.onclick = toggleDropdown;
+                    header.onkeydown = (e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            toggleDropdown(e);
+                        }
+                    };
+                }
+            });
+        }
+
+        // 加载情感映射配置
+        async function loadEmotionMapping(modelName) {
+            try {
+                const response = await fetch(`/api/live2d/emotion_mapping/${encodeURIComponent(modelName)}`);
+                const data = await response.json();
+
+                if (data.success && data.config) {
+                    const config = data.config;
+
+                    emotions.forEach(emotion => {
+                        const motionMS = document.querySelector(`.emotion-motion-select[data-emotion="${emotion}"]`);
+                        const expressionMS = document.querySelector(`.emotion-expression-select[data-emotion="${emotion}"]`);
+
+                        // 清除当前选择
+                        if (motionMS) {
+                            motionMS.querySelectorAll('input').forEach(cb => cb.checked = false);
+                            updateMultiselectHeader(motionMS);
+                        }
+                        if (expressionMS) {
+                            expressionMS.querySelectorAll('input').forEach(cb => cb.checked = false);
+                            updateMultiselectHeader(expressionMS);
+                        }
+
+                        // 填充新选择
+                        if (config.motions && config.motions[emotion]) {
+                            const rawFiles = config.motions[emotion];
+                            const files = typeof rawFiles === 'string' ? [rawFiles] : rawFiles;
+                            if (motionMS) {
+                                files.forEach(file => {
+                                    const cb = motionMS.querySelector(`input[value="${CSS.escape(file)}"]`);
+                                    if (cb) cb.checked = true;
+                                });
+                                updateMultiselectHeader(motionMS);
+                            }
+                        }
+
+                        if (config.expressions && config.expressions[emotion]) {
+                            const rawFiles = config.expressions[emotion];
+                            const files = typeof rawFiles === 'string' ? [rawFiles] : rawFiles;
+                            if (expressionMS) {
+                                files.forEach(file => {
+                                    const cb = expressionMS.querySelector(`input[value="${CSS.escape(file)}"]`);
+                                    if (cb) cb.checked = true;
+                                });
+                                updateMultiselectHeader(expressionMS);
+                            }
+                        }
+
+                        // 兼容旧格式 (如果是字符串则转为数组)
+                        if (config[emotion]) {
+                            if (motionMS && config[emotion].motion) {
+                                const rawFiles = config[emotion].motion;
+                                const files = typeof rawFiles === 'string' ? [rawFiles] : rawFiles;
+                                files.forEach(file => {
+                                    const cb = motionMS.querySelector(`input[value="${CSS.escape(file)}"]`);
+                                    if (cb) cb.checked = true;
+                                });
+                                updateMultiselectHeader(motionMS);
+                            }
+                            if (expressionMS && config[emotion].expression) {
+                                const rawFiles = config[emotion].expression;
+                                const files = typeof rawFiles === 'string' ? [rawFiles] : rawFiles;
+                                files.forEach(file => {
+                                    const cb = expressionMS.querySelector(`input[value="${CSS.escape(file)}"]`);
+                                    if (cb) cb.checked = true;
+                                });
+                                updateMultiselectHeader(expressionMS);
+                            }
+                        }
+                    });
+
+                    showStatus(t('emotionManager.configLoadSuccess'), 'success');
+                }
+            } catch (error) {
+                console.error('加载情感映射配置失败:', error);
+            }
+        }
+
+        // 保存情感映射配置
+        async function saveEmotionMapping() {
+            if (!currentModelInfo) {
+                showStatus(t('emotionManager.pleaseSelectModelFirst'), 'error');
+                return;
+            }
+
+            const config = {
+                motions: {},
+                expressions: {}
+            };
+
+            emotions.forEach(emotion => {
+                const motionMS = document.querySelector(`.emotion-motion-select[data-emotion="${emotion}"]`);
+                const expressionMS = document.querySelector(`.emotion-expression-select[data-emotion="${emotion}"]`);
+
+                if (motionMS) {
+                    const selected = Array.from(motionMS.querySelectorAll('input:checked')).map(cb => cb.value);
+                    if (selected.length > 0) config.motions[emotion] = selected;
+                }
+
+                if (expressionMS) {
+                    const selected = Array.from(expressionMS.querySelectorAll('input:checked')).map(cb => cb.value);
+                    if (selected.length > 0) config.expressions[emotion] = selected;
+                }
+            });
+
+            try {
+                const response = await fetch(`/api/live2d/emotion_mapping/${encodeURIComponent(currentModelInfo.name)}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(config)
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    showStatus(t('emotionManager.configSaveSuccess'), 'success');
+                } else {
+                    showStatus(t('emotionManager.saveFailed') + ': ' + (data.error || t('common.unknownError')), 'error');
+                }
+            } catch (error) {
+                console.error('保存情感映射配置失败:', error);
+                showStatus(t('emotionManager.saveFailed') + ': ' + error.message, 'error');
+            }
+        }
+
+        // 重置配置
+        function resetConfig() {
+            document.querySelectorAll('.custom-multiselect').forEach(ms => {
+                ms.querySelectorAll('input').forEach(cb => cb.checked = false);
+                updateMultiselectHeader(ms);
+            });
+
+            showStatus(t('emotionManager.configReset'), 'info');
+        }
+
+        // 事件监听
+        saveBtn.addEventListener('click', saveEmotionMapping);
+        resetBtn.addEventListener('click', resetConfig);
+
+        // 初始化
+        (async () => {
+            await waitForI18nReady();
+            await loadModelList();
+        })();
+    </script>
+
+
+    <!-- 通用教程管理器 -->
+    <script src="/static/libs/driver.min.js?v={{ static_asset_version|default('0', true) }}"></script>
+    <script src="/static/tutorial/core/skip-controller.js?v={{ static_asset_version|default('0', true) }}"></script>
+    <script src="/static/tutorial/avatar/reload-controller.js?v={{ static_asset_version|default('0', true) }}"></script>
+    <script src="/static/tutorial/core/lifecycle-state-store.js?v={{ static_asset_version|default('0', true) }}"></script>
+    <script src="/static/tutorial/core/page-tutorial-manager.js?v={{ static_asset_version|default('0', true) }}"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            if (typeof initPageTutorialManager === 'function') {
+                initPageTutorialManager();
+            }
+        });
+    </script>
+</body>
+</html>

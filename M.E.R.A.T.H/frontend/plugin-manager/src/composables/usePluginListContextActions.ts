@@ -1,0 +1,346 @@
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
+import { deletePlugin } from '@/api/plugins'
+import { buildPluginCli } from '@/api/pluginCli'
+import { usePluginStore } from '@/stores/plugin'
+import type { PluginListAction, PluginMeta } from '@/types/api'
+import { resolveLocalizedText } from '@/utils/i18nLabel'
+import { openExternalUrl } from '@/utils/openExternal'
+
+type PluginListContextPlugin = PluginMeta & {
+  status?: string
+  enabled?: boolean
+  autoStart?: boolean
+}
+
+export type ResolvedPluginListAction = PluginListAction & {
+  label: string
+  disabled: boolean
+  source: 'builtin' | 'plugin'
+  sectionKey: 'navigation' | 'runtime' | 'plugin'
+  sectionLabel: string
+  sectionTone: 'slate' | 'mint' | 'sky'
+}
+
+const BUILTIN_ACTION_IDS = [
+  'open_detail',
+  'open_config',
+  'open_logs',
+] as const
+
+export function usePluginListContextActions() {
+  const router = useRouter()
+  const pluginStore = usePluginStore()
+  const { t, locale } = useI18n()
+
+  function isRunning(plugin: PluginListContextPlugin): boolean {
+    return plugin.status === 'running'
+  }
+
+  function resolveBuiltinActions(plugin: PluginListContextPlugin): PluginListAction[] {
+    const actions: PluginListAction[] = BUILTIN_ACTION_IDS.map((id) => ({
+      id,
+      kind: 'builtin',
+    }))
+
+    if (!isRunning(plugin)) {
+      actions.push({
+        id: 'start',
+        kind: 'builtin',
+      })
+    }
+    if (isRunning(plugin)) {
+      actions.push({
+        id: 'stop',
+        kind: 'builtin',
+        danger: true,
+      })
+    }
+    actions.push({
+      id: 'reload',
+      kind: 'builtin',
+    })
+    actions.push(
+      {
+        id: 'build',
+        kind: 'builtin',
+      },
+      {
+        id: 'delete',
+        kind: 'builtin',
+        danger: true,
+        confirm_mode: 'hold',
+      },
+    )
+    return actions
+  }
+
+  function resolveActionLabel(action: PluginListAction): string {
+    // 后端 label 可能是 string 或 locale-keyed dict，统一走 resolveLocalizedText
+    // 解析；解析后为空再回退到内置 action id 对应的 i18n key。
+    const localized = resolveLocalizedText(action.label, locale.value, '')
+    if (localized) {
+      return localized
+    }
+    switch (action.id) {
+      case 'open_detail':
+        return t('plugins.viewDetails')
+      case 'open_config':
+        return t('plugins.config')
+      case 'open_logs':
+        return t('plugins.logs')
+      case 'open_panel':
+        return t('plugins.ui.panel')
+      case 'open_guide':
+        return t('plugins.ui.guide')
+      case 'start':
+        return t('plugins.start')
+      case 'stop':
+        return t('plugins.stop')
+      case 'reload':
+        return t('plugins.reload')
+      case 'build':
+        return t('plugins.build')
+      case 'delete':
+        return t('plugins.delete')
+      case 'open_ui':
+        return t('plugins.ui.open')
+      default:
+        return action.id
+    }
+  }
+
+  function resolveActionDisabled(action: PluginListAction, plugin: PluginListContextPlugin): boolean {
+    if (action.disabled === true) {
+      return true
+    }
+    if (action.requires_running && !isRunning(plugin)) {
+      return true
+    }
+    return false
+  }
+
+  function resolveActionSection(action: PluginListAction): {
+    key: 'navigation' | 'runtime' | 'plugin'
+    label: string
+    tone: 'slate' | 'mint' | 'sky'
+  } {
+    switch (action.id) {
+      case 'open_detail':
+      case 'open_config':
+      case 'open_logs':
+      case 'open_panel':
+      case 'open_guide':
+        return {
+          key: 'navigation',
+          label: t('plugins.contextSections.navigation'),
+          tone: 'slate',
+        }
+      case 'start':
+      case 'stop':
+      case 'reload':
+        return {
+          key: 'runtime',
+          label: t('plugins.contextSections.runtime'),
+          tone: 'mint',
+        }
+      default:
+        return {
+          key: 'plugin',
+          label: t('plugins.contextSections.plugin'),
+          tone: 'sky',
+        }
+    }
+  }
+
+  function buildActions(plugin: PluginListContextPlugin): ResolvedPluginListAction[] {
+    const resolved: ResolvedPluginListAction[] = []
+    const seenIds = new Set<string>()
+
+    const append = (action: PluginListAction, source: 'builtin' | 'plugin') => {
+      if (!action.id || seenIds.has(action.id)) {
+        return
+      }
+      seenIds.add(action.id)
+      const section = resolveActionSection(action)
+      resolved.push({
+        ...action,
+        label: resolveActionLabel(action),
+        disabled: resolveActionDisabled(action, plugin),
+        source,
+        sectionKey: section.key,
+        sectionLabel: section.label,
+        sectionTone: section.tone,
+      })
+    }
+
+    for (const action of resolveBuiltinActions(plugin)) {
+      append(action, 'builtin')
+    }
+    for (const action of plugin.list_actions || []) {
+      append(action, 'plugin')
+    }
+
+    return resolved
+  }
+
+  async function confirmIfNeeded(action: ResolvedPluginListAction) {
+    if (action.confirm_mode === 'hold') {
+      return true
+    }
+    // confirm_message 与 label 同样是 LocalizedText（string 或 locale-keyed
+    // dict），不能直接传给 ElMessageBox.confirm（它会把 dict 渲染成
+    // "[object Object]"）。解析为空时跳过确认。
+    const message = resolveLocalizedText(action.confirm_message, locale.value, '')
+    if (!message) {
+      return true
+    }
+    try {
+      await ElMessageBox.confirm(message, t('common.confirm'), {
+        type: action.danger ? 'warning' : 'info',
+      })
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  function resolvePackageDisplayName(packagePath: string): string {
+    const normalized = packagePath.replace(/\\/g, '/')
+    const segments = normalized.split('/')
+    return segments[segments.length - 1] || packagePath
+  }
+
+  function shouldUseHoldConfirm(action: ResolvedPluginListAction): boolean {
+    return action.confirm_mode === 'hold'
+  }
+
+  async function executeBuiltinAction(action: ResolvedPluginListAction, plugin: PluginListContextPlugin) {
+    const safeId = encodeURIComponent(plugin.id)
+    switch (action.id) {
+      case 'open_detail':
+        await router.push(`/plugins/${safeId}`)
+        return
+      case 'open_config':
+        await router.push({ path: `/plugins/${safeId}`, query: { tab: 'config' } })
+        return
+      case 'open_logs':
+        await router.push({ path: `/plugins/${safeId}`, query: { tab: 'logs' } })
+        return
+      case 'open_panel':
+        await router.push({ path: `/plugins/${safeId}`, query: { tab: 'panel' } })
+        return
+      case 'open_guide':
+        await router.push({ path: `/plugins/${safeId}`, query: { tab: 'guide' } })
+        return
+      case 'start':
+        await pluginStore.start(plugin.id)
+        ElMessage.success(t('messages.pluginStarted'))
+        return
+      case 'stop':
+        if (!(await confirmIfNeeded({
+          ...action,
+          confirm_message: action.confirm_message || t('messages.confirmStop'),
+        }))) {
+          return
+        }
+        await pluginStore.stop(plugin.id)
+        ElMessage.success(t('messages.pluginStopped'))
+        return
+      case 'reload':
+        if (!(await confirmIfNeeded({
+          ...action,
+          confirm_message: action.confirm_message || t('messages.confirmReload'),
+        }))) {
+          return
+        }
+        await pluginStore.reload(plugin.id)
+        ElMessage.success(t('messages.pluginReloaded'))
+        return
+      case 'build': {
+        const result = await buildPluginCli({
+          mode: 'single',
+          plugin: plugin.id,
+        })
+        const builtItem = result.built.find(item => item.plugin_id === plugin.id) || result.built[0]
+        if (!builtItem) {
+          throw new Error(result.failed[0]?.error || t('messages.buildFailed'))
+        }
+        ElMessage.success(
+          t('messages.pluginBuilt', {
+            packageName: resolvePackageDisplayName(builtItem.package_path),
+          }),
+        )
+        return
+      }
+      case 'delete':
+        {
+          const result = await deletePlugin(plugin.id)
+          if (result.restored_builtin_restart_error) {
+            ElMessage.warning(t('messages.pluginDeletedBuiltinRestartFailed', {
+              plugin: plugin.name,
+              error: result.restored_builtin_restart_error.message,
+            }))
+          } else {
+            ElMessage.success(t('messages.pluginDeleted'))
+          }
+        }
+        try {
+          await pluginStore.syncRegistryAndFetch()
+          await pluginStore.fetchPluginStatus()
+        } catch (error) {
+          console.warn('Failed to refresh plugin data after delete:', error)
+        }
+        return
+      default:
+        ElMessage.warning(action.label)
+    }
+  }
+
+  async function executeAction(action: ResolvedPluginListAction, plugin: PluginListContextPlugin) {
+    if (action.disabled) {
+      return
+    }
+
+    if (action.kind === 'builtin') {
+      await executeBuiltinAction(action, plugin)
+      return
+    }
+
+    if (!(await confirmIfNeeded(action))) {
+      return
+    }
+
+    // 后端 _normalize_plugin_list_action 在 plugin/server/application/plugins/
+    // ui_query_service.py:481 已经把 `{plugin_id}` 占位符替换并 strip 过；
+    // 前端直接消费就行，不再二次替换。
+    const target = typeof action.target === 'string' ? action.target : ''
+    if (!target) {
+      ElMessage.warning(action.label)
+      return
+    }
+
+    if (action.kind === 'route') {
+      await router.push(target)
+      return
+    }
+
+    if (action.kind === 'ui' || action.kind === 'url') {
+      // _blank 走 openExternalUrl，让 Electron host 把它转发到系统浏览器，
+      // 避免嵌入 webview 没有关闭按钮把用户困住；same_tab 仍是当前窗口
+      // navigation。
+      if (action.open_in === 'same_tab') {
+        window.open(target, '_self')
+      } else {
+        openExternalUrl(target)
+      }
+    }
+  }
+
+  return {
+    buildActions,
+    executeAction,
+    shouldUseHoldConfirm,
+  }
+}

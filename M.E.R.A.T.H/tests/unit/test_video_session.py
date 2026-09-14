@@ -1,0 +1,566 @@
+"""
+test_video_session.py — OmniRealtimeClient video/screen streaming tests.
+
+Tests that video (screen share / camera) image streaming works correctly
+for different model providers (qwen, glm, gpt), including:
+- Correct WebSocket event types per provider
+- Image data encoding (base64)
+- Rate limiting behavior for native image input
+- Vision model fallback for models without native vision support
+"""
+import asyncio
+import pytest
+import json
+from unittest.mock import AsyncMock
+
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
+
+from main_logic.omni_realtime_client import OmniRealtimeClient, TurnDetectionMode
+
+
+# Dummy 1x1 pixel JPEG image in base64
+DUMMY_IMAGE_B64 = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAFBABAAAAAAAAAAAAAAAAAAAACf/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AE0A/9k="
+
+
+def _make_client(model: str, supports_native_image: bool = True, base_url: str = "wss://test.example.com") -> OmniRealtimeClient:
+    """Helper to create a test OmniRealtimeClient with mocked ws."""
+    client = OmniRealtimeClient(
+        base_url=base_url,
+        api_key="test-key",
+        model=model,
+        turn_detection_mode=TurnDetectionMode.SERVER_VAD,
+        on_text_delta=AsyncMock(),
+        on_audio_delta=AsyncMock(),
+        on_input_transcript=AsyncMock(),
+        on_output_transcript=AsyncMock()
+    )
+    # Pre-set ws mock to skip connect()
+    client.ws = AsyncMock()
+    client._supports_native_image = supports_native_image
+    client._audio_in_buffer = True  # Simulate active audio session
+    client._last_native_image_time = 0  # Allow first image through
+    return client
+
+
+@pytest.mark.unit
+async def test_qwen_image_streaming():
+    """Test that Qwen models send images as input_image_buffer.append events."""
+    client = _make_client("qwen-omni-turbo")
+    
+    await client.stream_image(DUMMY_IMAGE_B64)
+    
+    # Verify send was called with correct event
+    assert client.ws.send.called
+    calls = client.ws.send.call_args_list
+    
+    image_event_found = False
+    for call_args in calls:
+        msg = json.loads(call_args[0][0])
+        if msg.get("type") == "input_image_buffer.append":
+            image_event_found = True
+            assert msg["image"] == DUMMY_IMAGE_B64
+    
+    assert image_event_found, "Expected input_image_buffer.append event for Qwen model"
+    await client.close()
+
+
+@pytest.mark.unit
+async def test_glm_image_streaming():
+    """Test that GLM models send images as append_video_frame events."""
+    client = _make_client("glm-4-realtime")
+    
+    await client.stream_image(DUMMY_IMAGE_B64)
+    
+    assert client.ws.send.called
+    calls = client.ws.send.call_args_list
+    
+    video_frame_found = False
+    for call_args in calls:
+        msg = json.loads(call_args[0][0])
+        if msg.get("type") == "input_audio_buffer.append_video_frame":
+            video_frame_found = True
+            assert msg["video_frame"] == DUMMY_IMAGE_B64
+    
+    assert video_frame_found, "Expected input_audio_buffer.append_video_frame event for GLM model"
+    await client.close()
+
+
+@pytest.mark.unit
+async def test_gpt_image_streaming():
+    """Test that GPT models send images as conversation.item.create events."""
+    client = _make_client("gpt-4o-realtime")
+    
+    await client.stream_image(DUMMY_IMAGE_B64)
+    
+    assert client.ws.send.called
+    calls = client.ws.send.call_args_list
+    
+    image_msg_found = False
+    for call_args in calls:
+        msg = json.loads(call_args[0][0])
+        if msg.get("type") == "conversation.item.create":
+            item = msg.get("item", {})
+            if item.get("role") == "user":
+                content = item.get("content", [])
+                for c in content:
+                    if c.get("type") == "input_image":
+                        image_msg_found = True
+                        assert DUMMY_IMAGE_B64 in c["image_url"]
+    
+    assert image_msg_found, "Expected conversation.item.create with input_image for GPT model"
+    await client.close()
+
+
+@pytest.mark.unit
+async def test_image_rate_limiting():
+    """Test that native image input is rate-limited."""
+    client = _make_client("qwen-omni-turbo")
+    
+    # Send first image — should go through (last_native_image_time = 0)
+    await client.stream_image(DUMMY_IMAGE_B64)
+    first_call_count = client.ws.send.call_count
+    assert first_call_count > 0, "First image should be sent"
+    
+    # Immediately send second image — should be rate-limited (too soon)
+    await client.stream_image(DUMMY_IMAGE_B64)
+    second_call_count = client.ws.send.call_count
+    assert second_call_count == first_call_count, "Second image should be rate-limited (sent too quickly)"
+    
+    await client.close()
+
+
+@pytest.mark.unit
+async def test_non_native_vision_fallback():
+    """Test that models without native vision use VISION_MODEL fallback."""
+    client = _make_client("step-realtime", supports_native_image=False)
+    # Mark the image description as "analyzing" to trigger the vision model path
+    client._image_description = "实时屏幕截图或相机画面正在分析中"
+
+    # Mock the _analyze_image_with_vision_model method
+    client._analyze_image_with_vision_model = AsyncMock()
+
+    await client.stream_image(DUMMY_IMAGE_B64)
+
+    # Should have called vision model fallback
+    assert client._analyze_image_with_vision_model.called
+    assert client._analyze_image_with_vision_model.call_args[0][0] == DUMMY_IMAGE_B64
+
+    await client.close()
+
+
+@pytest.mark.unit
+async def test_step_response_done_rearms_next_frame_analysis():
+    client = _make_client("step-realtime", supports_native_image=False)
+    client._image_description = "[实时屏幕截图或相机画面]: 一只猫"
+    client._image_recognized_this_turn = True
+    client._current_response_id = "resp-step"
+    client._is_responding = True
+    client._close_failed_transport = AsyncMock()
+    client.ws.__aiter__.return_value = [
+        json.dumps(
+            {
+                "type": "response.done",
+                "response": {"id": "resp-step", "status": "completed"},
+            }
+        )
+    ]
+
+    await client.handle_messages()
+
+    assert client._image_recognized_this_turn is False
+    assert "正在分析中" in client._image_description
+
+    client._analyze_image_with_vision_model = AsyncMock()
+    await client.stream_image(DUMMY_IMAGE_B64)
+    client._analyze_image_with_vision_model.assert_awaited_once_with(
+        DUMMY_IMAGE_B64
+    )
+    await client.close()
+
+
+@pytest.mark.unit
+async def test_step_response_done_preserves_unconsumed_frame_annotation():
+    client = _make_client("step-realtime", supports_native_image=False)
+    annotation = "[实时屏幕截图或相机画面]: 一只猫"
+    client._latest_image_b64 = DUMMY_IMAGE_B64
+    client._proactive_image_consumed = False
+    client._image_description = annotation
+    client._image_recognized_this_turn = True
+    client._current_response_id = "resp-current"
+    client._is_responding = True
+    client._close_failed_transport = AsyncMock()
+    client.ws.__aiter__.return_value = [
+        json.dumps(
+            {
+                "type": "response.done",
+                "response": {"id": "resp-other", "status": "completed"},
+            }
+        )
+    ]
+
+    await client.handle_messages()
+
+    assert client._image_recognized_this_turn is True
+    assert client._image_description == annotation
+    assert client._proactive_image_consumed is False
+    await client.close()
+
+
+@pytest.mark.unit
+async def test_non_native_callback_analysis_does_not_replace_ambient_snapshot():
+    client = _make_client("step-realtime", supports_native_image=False)
+    client._latest_image_b64 = "ambient-frame"
+    client._proactive_image_consumed = False
+    client._image_description = "ambient description"
+    client._image_recognized_this_turn = True
+
+    async def analyze_callback(image_b64, *, update_turn_state=True):
+        assert image_b64 == DUMMY_IMAGE_B64
+        assert update_turn_state is False
+        return "callback description"
+
+    client._analyze_image_with_vision_model = analyze_callback
+
+    result = await client.stream_image(
+        DUMMY_IMAGE_B64,
+        bypass_rate_limit=True,
+        cache_latest=False,
+    )
+
+    assert result.accepted is True
+    assert result.mode == "external_description"
+    assert result.description == "callback description"
+    assert client._latest_image_b64 == "ambient-frame"
+    assert client._proactive_image_consumed is False
+    assert client._image_description == "ambient description"
+    assert client._image_recognized_this_turn is True
+    await client.close()
+
+
+@pytest.mark.unit
+async def test_concurrent_non_native_frame_does_not_replace_analyzed_snapshot():
+    client = _make_client("step-realtime", supports_native_image=False)
+    client._image_description = "实时屏幕截图或相机画面正在分析中"
+    first_frame = DUMMY_IMAGE_B64
+    second_frame = DUMMY_IMAGE_B64 + "second"
+    analysis_started = asyncio.Event()
+    release_analysis = asyncio.Event()
+    analyzed = []
+
+    async def analyze(image_b64):
+        analyzed.append(image_b64)
+        analysis_started.set()
+        await release_analysis.wait()
+
+    client._analyze_image_with_vision_model = analyze
+    generation = client._latest_image_generation
+    first_task = asyncio.create_task(client.stream_image(first_frame))
+    await analysis_started.wait()
+
+    second_result = await client.stream_image(second_frame)
+
+    assert client._latest_image_b64 == first_frame
+    assert client._latest_image_generation == generation + 1
+    assert analyzed == [first_frame]
+    assert second_result.accepted is False
+    release_analysis.set()
+    first_result = await first_task
+    assert first_result.accepted is False
+    assert first_result.mode == "external_description"
+    await client.close()
+
+
+@pytest.mark.unit
+async def test_non_native_failed_description_send_releases_analysis_gate_after_reset():
+    client = _make_client("legacy-realtime", supports_native_image=False)
+    first_frame = DUMMY_IMAGE_B64
+    second_frame = DUMMY_IMAGE_B64 + "second"
+    next_frame = DUMMY_IMAGE_B64 + "next"
+    client._latest_image_b64 = first_frame
+    client._latest_image_generation = 1
+    client._proactive_image_consumed = False
+    client._image_description = "[实时屏幕截图或相机画面]: 一只猫"
+    client._image_recognized_this_turn = True
+    client._image_sent_this_turn = False
+
+    first_send_started = asyncio.Event()
+    release_first_send = asyncio.Event()
+    send_count = 0
+
+    async def send_event(_event):
+        nonlocal send_count
+        send_count += 1
+        if send_count == 1:
+            first_send_started.set()
+            await release_first_send.wait()
+        return False
+
+    analyzed = []
+
+    async def analyze(image_b64):
+        analyzed.append(image_b64)
+        client._image_being_analyzed = False
+        return "下一帧"
+
+    client.send_event = send_event
+    client._analyze_image_with_vision_model = analyze
+
+    first_task = asyncio.create_task(client.stream_image(first_frame))
+    await first_send_started.wait()
+    second_task = asyncio.create_task(client.stream_image(second_frame))
+    await asyncio.sleep(0)
+    assert not second_task.done()
+
+    # A completed callback may consume the annotation while another screen
+    # frame has already passed the pending-sentinel check and is waiting for
+    # the image lock. The receive-loop reset does not share that lock.
+    client._proactive_image_consumed = True
+    client._reset_per_turn_output_state()
+    assert client._image_recognized_this_turn is False
+    assert "正在分析中" in client._image_description
+
+    release_first_send.set()
+    first_result, second_result = await asyncio.gather(first_task, second_task)
+
+    assert first_result.accepted is False
+    assert second_result.accepted is False
+    assert client._image_being_analyzed is False
+    assert analyzed == []
+
+    await client.stream_image(next_frame)
+    assert analyzed == [next_frame]
+    await client.close()
+
+
+@pytest.mark.unit
+async def test_completed_non_native_annotation_pins_its_unconsumed_frame():
+    client = _make_client("step-realtime", supports_native_image=False)
+    first_frame = DUMMY_IMAGE_B64
+    second_frame = DUMMY_IMAGE_B64 + "second"
+    generation = client._latest_image_generation + 1
+    client._latest_image_b64 = first_frame
+    client._latest_image_generation = generation
+    client._proactive_image_consumed = False
+    client._image_recognized_this_turn = True
+    client._image_description = "[实时屏幕截图或相机画面]: 一只猫"
+    client._analyze_image_with_vision_model = AsyncMock()
+    client.send_event = AsyncMock()
+
+    await client.stream_image(second_frame)
+
+    assert client._latest_image_b64 == first_frame
+    assert client._latest_image_generation == generation
+    assert client._proactive_image_consumed is False
+    assert client._image_description == "[实时屏幕截图或相机画面]: 一只猫"
+    client._analyze_image_with_vision_model.assert_not_awaited()
+    client.send_event.assert_awaited_once()
+    sent_event = client.send_event.await_args.args[0]
+    assert sent_event["item"]["content"][0]["text"] == client._image_description
+    await client.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("recognized", "being_analyzed", "sent"),
+    [
+        (False, True, False),
+        (True, False, True),
+    ],
+)
+async def test_non_native_fallback_noop_is_not_reported_as_accepted(
+    recognized: bool,
+    being_analyzed: bool,
+    sent: bool,
+):
+    client = _make_client("legacy-realtime", supports_native_image=False)
+    client._image_description = "已有视觉状态"
+    client._image_recognized_this_turn = recognized
+    client._image_being_analyzed = being_analyzed
+    client._image_sent_this_turn = sent
+    client.send_event = AsyncMock()
+    client._analyze_image_with_vision_model = AsyncMock()
+
+    result = await client.stream_image(DUMMY_IMAGE_B64)
+
+    assert result.accepted is False
+    client.send_event.assert_not_awaited()
+    client._analyze_image_with_vision_model.assert_not_awaited()
+    await client.close()
+
+
+@pytest.mark.unit
+async def test_non_native_failed_vision_clears_cached_frame(monkeypatch):
+    client = _make_client("step-realtime", supports_native_image=False)
+    client._image_description = "实时屏幕截图或相机画面正在分析中"
+
+    async def fake_analyze_image_with_vision_model(**_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "utils.screenshot_utils.analyze_image_with_vision_model",
+        fake_analyze_image_with_vision_model,
+    )
+
+    await client.stream_image(DUMMY_IMAGE_B64)
+
+    assert client._image_recognized_this_turn is False
+    assert client._latest_image_b64 is None
+    assert client._proactive_image_consumed is True
+    assert "正在分析中" in client._image_description
+
+    await client.close()
+
+
+@pytest.mark.unit
+def test_livestream_free_supports_native_vision():
+    """Livestream 主播自建 server_prefix 上游同为 Gemini 系，free 路应被判定为原生视觉，
+    哪怕 base_url 既不含 lanlan.app 也不含 lanlan.tech（已被派生为自建地址）。"""
+    client = OmniRealtimeClient(
+        base_url="ws://streamer.example:8080/tok/core",
+        api_key="test-key",
+        model="free-model",
+        turn_detection_mode=TurnDetectionMode.SERVER_VAD,
+        api_type="free",
+        livestream_mode=True,
+    )
+    assert client._is_free_provider is True
+    assert client._is_free_proxy is True
+    assert client._supports_native_image is True
+    # livestream 自建上游是 Gemini 系，不应被当成有 server VAD 的 StepFun proxy
+    assert client._has_server_vad is False
+
+
+@pytest.mark.unit
+async def test_livestream_free_image_streaming():
+    """Livestream free 发图应走 input_image_buffer.append（Gemini 代理协议），
+    不落入 VISION_MODEL 分析通道。"""
+    client = OmniRealtimeClient(
+        base_url="ws://streamer.example:8080/tok/core",
+        api_key="test-key",
+        model="free-model",
+        turn_detection_mode=TurnDetectionMode.SERVER_VAD,
+        api_type="free",
+        livestream_mode=True,
+    )
+    client.ws = AsyncMock()
+    client._audio_in_buffer = True
+    client._last_native_image_time = 0
+    client._analyze_image_with_vision_model = AsyncMock()
+
+    await client.stream_image(DUMMY_IMAGE_B64)
+
+    assert not client._analyze_image_with_vision_model.called, (
+        "Livestream free 不应走分析通道"
+    )
+    image_event_found = False
+    for call_args in client.ws.send.call_args_list:
+        msg = json.loads(call_args[0][0])
+        if msg.get("type") == "input_image_buffer.append":
+            image_event_found = True
+            assert msg["image"] == DUMMY_IMAGE_B64
+    assert image_event_found, "Expected input_image_buffer.append event for livestream free"
+    await client.close()
+
+
+@pytest.mark.unit
+def test_domestic_free_supports_native_vision_without_gemini_proxy_vad():
+    """www.lanlan.tech free now accepts native images but keeps its own
+    server-VAD lifecycle instead of inheriting the lanlan.app Gemini proxy
+    behaviour."""
+    client = OmniRealtimeClient(
+        base_url="wss://www.lanlan.tech/api/v1/realtime",
+        api_key="test-key",
+        model="free-model",
+        turn_detection_mode=TurnDetectionMode.SERVER_VAD,
+        api_type="free",
+    )
+
+    assert client._is_free_provider is True
+    assert client._is_free_proxy is False
+    assert client._supports_native_image is True
+    assert client._has_server_vad is True
+
+
+@pytest.mark.unit
+def test_custom_model_name_containing_free_is_not_lanlan_provider():
+    client = OmniRealtimeClient(
+        base_url="wss://custom.example/realtime",
+        api_key="test-key",
+        model="freeform-realtime",
+        turn_detection_mode=TurnDetectionMode.SERVER_VAD,
+        api_type="local",
+    )
+
+    assert client._is_free_provider is False
+    assert client._is_free_proxy is False
+    assert client._supports_native_image is False
+
+
+@pytest.mark.unit
+def test_legacy_free_model_fallback_requires_known_lanlan_route():
+    lanlan_client = OmniRealtimeClient(
+        base_url="wss://www.lanlan.tech/api/v1/realtime",
+        api_key="test-key",
+        model="free-model",
+        turn_detection_mode=TurnDetectionMode.SERVER_VAD,
+    )
+    custom_client = OmniRealtimeClient(
+        base_url="wss://custom.example/realtime",
+        api_key="test-key",
+        model="free-model",
+        turn_detection_mode=TurnDetectionMode.SERVER_VAD,
+    )
+
+    assert lanlan_client._is_free_provider is True
+    assert lanlan_client._supports_native_image is True
+    assert custom_client._is_free_provider is False
+    assert custom_client._supports_native_image is False
+
+
+@pytest.mark.unit
+async def test_domestic_free_image_streaming_bypasses_vision_model():
+    """Domestic free sends the same native image event as the other free
+    routes and never invokes the external VISION_MODEL annotator."""
+    client = OmniRealtimeClient(
+        base_url="wss://www.lanlan.tech/api/v1/realtime",
+        api_key="test-key",
+        model="free-model",
+        turn_detection_mode=TurnDetectionMode.SERVER_VAD,
+        api_type="free",
+    )
+    client.ws = AsyncMock()
+    client._audio_in_buffer = False
+    client._last_native_image_time = 0
+    client._analyze_image_with_vision_model = AsyncMock()
+
+    await client.stream_image(DUMMY_IMAGE_B64, bypass_rate_limit=True)
+
+    assert not client._analyze_image_with_vision_model.called
+    events = [
+        json.loads(call_args[0][0])
+        for call_args in client.ws.send.call_args_list
+    ]
+    assert any(
+        event.get("type") == "input_image_buffer.append"
+        and event.get("image") == DUMMY_IMAGE_B64
+        for event in events
+    )
+    await client.close()
+
+
+@pytest.mark.unit
+async def test_proactive_native_image_can_send_without_audio_buffer():
+    """A deliberate proactive image is not coupled to microphone buffer state."""
+    client = _make_client("qwen-omni-turbo")
+    client._audio_in_buffer = False
+
+    await client.stream_image(DUMMY_IMAGE_B64, bypass_rate_limit=True)
+
+    events = [
+        json.loads(call_args[0][0])
+        for call_args in client.ws.send.call_args_list
+    ]
+    assert any(event.get("type") == "input_image_buffer.append" for event in events)
+    await client.close()
